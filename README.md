@@ -26,16 +26,35 @@ The full frozen spec lives in [`docs/BLUEPRINT-v1.2.0.md`](docs/BLUEPRINT-v1.2.0
 project-alpha/
 ├── docs/BLUEPRINT-v1.2.0.md   # Master spec (frozen)
 ├── setup_alpha.py              # Local scaffold generator
+├── index.html                  # Vite entry
+├── vite.config.ts
+├── package.json                # Frontend dev (design reference)
+├── public/
+├── src/
+│   ├── App.tsx                 # Command center UI (from Strategy Runner)
+│   ├── components/             # Dashboard panels
+│   ├── lib/
+│   └── optimizer/              # Fitness engine, cadence, WebAuthn client
 ├── agents/                     # Primordial subagent prompts
 ├── prompts/                    # Ciel orchestrator system prompt
 ├── data/ciel_agent_ledger.json
 ├── app/execution/              # M8StateEngine, LeverageEngine, FeeEngine, etc.
-├── src/optimizer/              # Fitness engine, cadence module, WebAuthn client
 ├── tests/                      # TDD test suites
 └── bin/m8-ctl                  # Emergency control CLI
 ```
 
-## Quick Start
+## Frontend (Design Reference)
+
+The React dashboard is ported from the Kraken Strategy Runner for **UI/design reference**. API calls require a backend; run the UI standalone:
+
+```bash
+npm install
+npm run dev
+```
+
+Open http://localhost:5173 — panels render; live data needs the execution API (Phase 1+).
+
+## Quick Start (Python skeleton)
 
 ```bash
 python3 setup_alpha.py
