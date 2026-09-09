@@ -4,21 +4,29 @@ import {
   Wallet, TrendingUp, TrendingDown, DollarSign, RefreshCw, 
   ShieldCheck, Zap, Layers, AlertCircle, ArrowUpRight, ArrowDownRight,
   PieChart, ChevronRight, Lock, CheckCircle2, Search, SlidersHorizontal,
-  FileSpreadsheet, ShieldAlert
+  FileSpreadsheet, ShieldAlert, Key, Info, HelpCircle, AlertTriangle
 } from "lucide-react";
-import { KrakenAccountLedgers, KrakenSpotPosition, KrakenProPosition } from "../types";
-
+import { KrakenAccountLedgers, KrakenSpotPosition, KrakenProPosition, KrakenDualCredentialsStatus } from "../types";
 import { safeFetchJson } from "../lib/api";
+import KrakenDualAuthModal from "./KrakenDualAuthModal";
 
 interface KrakenLedgersPanelProps {
   isPaperTrading?: boolean;
   hasCredentials?: boolean;
+  hasSpotCredentials?: boolean;
+  hasFuturesCredentials?: boolean;
+  credentialsStatus?: KrakenDualCredentialsStatus | null;
+  onOpenCredentialsModal?: () => void;
   onRefreshTrigger?: () => void;
 }
 
 export default function KrakenLedgersPanel({
   isPaperTrading = true,
   hasCredentials = false,
+  hasSpotCredentials = true,
+  hasFuturesCredentials = true,
+  credentialsStatus = null,
+  onOpenCredentialsModal,
   onRefreshTrigger
 }: KrakenLedgersPanelProps) {
   const [activeLedgerTab, setActiveLedgerTab] = useState<'spot' | 'pro'>('spot');
@@ -27,6 +35,18 @@ export default function KrakenLedgersPanel({
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [syncNotice, setSyncNotice] = useState<string | null>(null);
+  const [showAuthModal, setShowAuthModal] = useState<boolean>(false);
+
+  const effectiveSpotStatus = credentialsStatus?.hasSpotCredentials ?? hasSpotCredentials;
+  const effectiveFuturesStatus = credentialsStatus?.hasFuturesCredentials ?? hasFuturesCredentials;
+
+  const handleOpenAuth = () => {
+    if (onOpenCredentialsModal) {
+      onOpenCredentialsModal();
+    } else {
+      setShowAuthModal(true);
+    }
+  };
 
   const fetchLedgers = async () => {
     if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
@@ -114,8 +134,35 @@ export default function KrakenLedgersPanel({
           </div>
         </div>
 
-        {/* Tab Selector & Sync */}
-        <div className="flex items-center space-x-2">
+        {/* Tab Selector, Dual API Key Status & Sync */}
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Dual API Key Status Inspector Button */}
+          <button
+            id="open-dual-auth-modal-btn"
+            onClick={handleOpenAuth}
+            className="flex items-center space-x-2 px-3 py-1.5 rounded-lg border bg-zinc-950 border-zinc-800 hover:border-zinc-700 hover:bg-zinc-900 transition-all text-xs cursor-pointer group shadow-sm"
+            title="Kraken Dual API-Key Architektur prüfen (Spot vs. Futures)"
+          >
+            <Key className="w-3.5 h-3.5 text-amber-400 group-hover:scale-110 transition-transform" />
+            <div className="flex items-center space-x-1.5">
+              <span className="text-[10px] text-zinc-400 font-bold uppercase hidden sm:inline">Keys:</span>
+              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border uppercase ${
+                effectiveSpotStatus
+                  ? 'bg-emerald-950 text-emerald-300 border-emerald-800/80'
+                  : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+              }`}>
+                Spot {effectiveSpotStatus ? '✓' : '•'}
+              </span>
+              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border uppercase ${
+                effectiveFuturesStatus
+                  ? 'bg-cyan-950 text-cyan-300 border-cyan-800/80'
+                  : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+              }`}>
+                Futures {effectiveFuturesStatus ? '✓' : '•'}
+              </span>
+            </div>
+          </button>
+
           <div className="flex bg-zinc-950 p-1 rounded-lg border border-zinc-800 text-xs">
             <button
               onClick={() => setActiveLedgerTab('spot')}
@@ -126,7 +173,7 @@ export default function KrakenLedgersPanel({
               }`}
             >
               <PieChart className="w-3.5 h-3.5 text-emerald-400" />
-              <span>1. Spot Position Ledger</span>
+              <span>1. Spot Ledger</span>
             </button>
             <button
               onClick={() => setActiveLedgerTab('pro')}
@@ -137,14 +184,14 @@ export default function KrakenLedgersPanel({
               }`}
             >
               <Zap className="w-3.5 h-3.5 text-purple-400" />
-              <span>2. Pro / Futures Position Ledger</span>
+              <span>2. Pro / Futures Ledger</span>
             </button>
           </div>
 
           <button
             onClick={handleManualSync}
             disabled={isSyncing}
-            className="px-3 py-1.5 rounded bg-zinc-800/90 hover:bg-zinc-750 border border-zinc-700 text-xs text-zinc-200 hover:text-white transition-all flex items-center space-x-1.5 disabled:opacity-50"
+            className="px-3 py-1.5 rounded bg-zinc-800/90 hover:bg-zinc-750 border border-zinc-700 text-xs text-zinc-200 hover:text-white transition-all flex items-center space-x-1.5 disabled:opacity-50 cursor-pointer"
             title="Force refresh balances & positions directly from Kraken"
           >
             <RefreshCw className={`w-3.5 h-3.5 text-emerald-400 ${isSyncing ? 'animate-spin' : ''}`} />
@@ -172,6 +219,35 @@ export default function KrakenLedgersPanel({
           animate={{ opacity: 1, y: 0 }}
           className="space-y-4"
         >
+          {/* Spot API Info & Status Banner */}
+          <div className="p-3 rounded-lg bg-zinc-950 border border-zinc-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs">
+            <div className="flex items-center space-x-2.5">
+              <div className="p-1.5 rounded bg-emerald-950/80 border border-emerald-800/80 text-emerald-400 shrink-0">
+                <PieChart className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="flex items-center space-x-2">
+                  <span className="font-bold text-white text-[11px]">Spot-Trading-API (api.kraken.com)</span>
+                  <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded border uppercase ${
+                    effectiveSpotStatus ? 'bg-emerald-950 text-emerald-300 border-emerald-800' : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+                  }`}>
+                    {effectiveSpotStatus ? 'Live Verbunden' : 'Simulierter Modus'}
+                  </span>
+                </div>
+                <p className="text-[10px] text-zinc-400 mt-0.5">
+                  Verwaltet Cash-Bestände (EUR/USD), Kryptowährungen und Spot-Orderbücher über <code className="text-emerald-400">KRAKEN_SPOT_API_KEY</code>.
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={handleOpenAuth}
+              className="text-[10px] text-zinc-300 hover:text-emerald-400 px-2 py-1 rounded bg-zinc-900 border border-zinc-800 hover:border-zinc-700 transition-colors flex items-center space-x-1 shrink-0 self-start sm:self-auto cursor-pointer"
+            >
+              <Key className="w-3 h-3 text-amber-400" />
+              <span>Spot-Key Details</span>
+            </button>
+          </div>
+
           {/* Spot Summary Metric Cards */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
             <div className="bg-zinc-900 border border-zinc-800 p-4 rounded-lg">
@@ -379,6 +455,36 @@ export default function KrakenLedgersPanel({
           animate={{ opacity: 1, y: 0 }}
           className="space-y-4"
         >
+          {/* Futures API Info & Status Banner */}
+          <div className="p-3 rounded-lg bg-zinc-950 border border-zinc-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs">
+            <div className="flex items-center space-x-2.5">
+              <div className="p-1.5 rounded bg-cyan-950/80 border border-cyan-800/80 text-cyan-400 shrink-0">
+                <Zap className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="flex items-center space-x-2">
+                  <span className="font-bold text-white text-[11px]">Futures-Trading-API (futures.kraken.com)</span>
+                  <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded border uppercase ${
+                    effectiveFuturesStatus ? 'bg-cyan-950 text-cyan-300 border-cyan-800' : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+                  }`}>
+                    {effectiveFuturesStatus ? 'Live Verbunden' : 'Simulierter Modus'}
+                  </span>
+                </div>
+                <p className="text-[10px] text-zinc-400 mt-0.5">
+                  Verwaltet Perpetual Swaps (PF_XBTUSD, PF_ETHUSD), Hebel &amp; Margin-Liquidationen über <code className="text-cyan-300">KRAKEN_FUTURES_API_KEY</code>.
+                  <span className="text-zinc-400 ml-1">Hinweis: Kraken Spot-Keys können keine Futures-Daten abrufen.</span>
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={handleOpenAuth}
+              className="text-[10px] text-zinc-300 hover:text-cyan-300 px-2 py-1 rounded bg-zinc-900 border border-zinc-800 hover:border-zinc-700 transition-colors flex items-center space-x-1 shrink-0 self-start sm:self-auto cursor-pointer"
+            >
+              <Key className="w-3 h-3 text-amber-400" />
+              <span>Futures-Key Details</span>
+            </button>
+          </div>
+
           {/* Pro / Futures Summary Metric Cards */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
             <div className="bg-zinc-900 border border-zinc-800 p-4 rounded-lg">
@@ -576,6 +682,14 @@ export default function KrakenLedgersPanel({
           </div>
         </motion.div>
       )}
+
+      {/* Kraken Dual API Key Architecture Modal */}
+      <KrakenDualAuthModal
+        isOpen={showAuthModal}
+        onClose={() => setShowAuthModal(false)}
+        credentialsStatus={credentialsStatus}
+        onRefreshStatus={onRefreshTrigger}
+      />
     </div>
   );
 }

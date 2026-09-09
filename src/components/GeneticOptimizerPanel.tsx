@@ -398,20 +398,20 @@ export function GeneticOptimizerPanel({
                   <option value="none">
                     ✨ Pure Genetic Exploration (No Orchestrator Baseline Seed)
                   </option>
-                  {strategies.filter(s => s.status !== 'archived').length > 0 && (
+                  {strategies.filter(s => (s.status || 'active') !== 'archived').length > 0 && (
                     <optgroup label="Orchestrator Strategies (Active / Inactive):">
-                      {strategies.filter(s => s.status !== 'archived').map((strat) => (
-                        <option key={strat.id} value={strat.id}>
-                          ⚡ {strat.name} {strat.version ? `(v${strat.version})` : ''} ({strat.assetPair} • {strat.interval}s • {strat.status.toUpperCase()})
+                      {strategies.filter(s => (s.status || 'active') !== 'archived').map((strat, idx) => (
+                        <option key={strat.id ? `strat-${strat.id}` : `strat-opt-${idx}`} value={strat.id}>
+                          ⚡ {strat.name || 'Unnamed Strategy'} {strat.version ? `(v${strat.version})` : ''} ({strat.assetPair || 'BTC/USD'} • {strat.interval || 15}s • {(strat.status || 'active').toUpperCase()})
                         </option>
                       ))}
                     </optgroup>
                   )}
                   {strategies.some(s => s.status === 'archived') && (
                     <optgroup label="Archived Strategies:">
-                      {strategies.filter(s => s.status === 'archived').map((strat) => (
-                        <option key={strat.id} value={strat.id}>
-                          📦 [ARCHIVED] {strat.name} {strat.version ? `(v${strat.version})` : ''} ({strat.assetPair})
+                      {strategies.filter(s => s.status === 'archived').map((strat, idx) => (
+                        <option key={strat.id ? `arch-${strat.id}` : `arch-opt-${idx}`} value={strat.id}>
+                          📦 [ARCHIVED] {strat.name || 'Archived Strategy'} {strat.version ? `(v${strat.version})` : ''} ({strat.assetPair || 'BTC/USD'})
                         </option>
                       ))}
                     </optgroup>
@@ -422,11 +422,11 @@ export function GeneticOptimizerPanel({
               {/* Quick-Select Strategy Chips */}
               <div className="md:col-span-4 flex flex-wrap items-center gap-1.5 overflow-x-auto py-0.5">
                 <span className="text-[10px] font-mono text-zinc-500 uppercase mr-1">Quick:</span>
-                {strategies.filter(s => s.status !== 'archived').slice(0, 3).map((strat) => {
+                {strategies.filter(s => (s.status || 'active') !== 'archived').slice(0, 3).map((strat, idx) => {
                   const isSelected = config.baselineStrategyId === strat.id;
                   return (
                     <button
-                      key={strat.id}
+                      key={strat.id ? `chip-${strat.id}` : `chip-opt-${idx}`}
                       onClick={() => handleSelectOrchestratorStrategy(strat.id)}
                       className={`px-2 py-1 rounded text-[10px] font-mono transition-all truncate max-w-[140px] ${
                         isSelected

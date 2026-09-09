@@ -6,12 +6,12 @@ import {
   Code2, Sliders, ArrowRight, Radio, Activity, ExternalLink, ShieldCheck,
   TrendingUp, TrendingDown, DollarSign, BarChart3, History, Dna, Layers,
   Wallet, FileSpreadsheet, Database, Archive, ArchiveRestore, GitCommit, Calculator,
-  Coins, ArrowUpRight
+  Coins, ArrowUpRight, Key, Bot
 } from "lucide-react";
 
-import { TradingStrategy, MarketTicker, ExecutionLog, TradeOrder, RunnerMetrics, StrategyPnL, QueueMatrixData, formatTimeframe } from "./types";
+import { TradingStrategy, MarketTicker, ExecutionLog, TradeOrder, RunnerMetrics, StrategyPnL, QueueMatrixData, formatTimeframe, KrakenDualCredentialsStatus } from "./types";
 import { getLedgerCurrency, getCurrencySymbol } from "./lib/symbolNormalizer";
-import { safeFetchJson, DashboardInitResponse } from "./lib/api";
+import { safeFetchJson, DashboardInitResponse, KrakenStatusResponse } from "./lib/api";
 import MetricsPanel from "./components/MetricsPanel";
 import TerminalPanel from "./components/TerminalPanel";
 import StrategyEditor from "./components/StrategyEditor";
@@ -21,15 +21,17 @@ import { BacktestingPanel } from "./components/BacktestingPanel";
 import { GeneticOptimizerPanel } from "./components/GeneticOptimizerPanel";
 import QueueMatrixPanel from "./components/QueueMatrixPanel";
 import KrakenLedgersPanel from "./components/KrakenLedgersPanel";
+import KrakenDualAuthModal from "./components/KrakenDualAuthModal";
 import { DataLakePanel } from "./components/DataLakePanel";
 import { SystemHealthPanel } from "./components/quant/SystemHealthPanel";
 import { QuantitativeRegimePanel } from "./components/quant/QuantitativeRegimePanel";
 import { ExecutionRiskPanel } from "./components/quant/ExecutionRiskPanel";
 import { AcademyRegistryPanel } from "./components/quant/AcademyRegistryPanel";
+import { WorkerBotSwarmPanel } from "./components/quant/WorkerBotSwarmPanel";
 
 export default function App() {
-  // Page Navigation State: 'overview' | 'health' | 'regime' | 'execution' | 'academy' | 'orchestrator' | 'backtesting' | 'genetic' | 'queues' | 'ledgers' | 'datalake'
-  const [activePage, setActivePage] = useState<'overview' | 'health' | 'regime' | 'execution' | 'academy' | 'orchestrator' | 'backtesting' | 'genetic' | 'queues' | 'ledgers' | 'datalake'>('overview');
+  // Page Navigation State: 'overview' | 'health' | 'regime' | 'execution' | 'academy' | 'orchestrator' | 'swarm' | 'backtesting' | 'genetic' | 'queues' | 'ledgers' | 'datalake'
+  const [activePage, setActivePage] = useState<'overview' | 'health' | 'regime' | 'execution' | 'academy' | 'orchestrator' | 'swarm' | 'backtesting' | 'genetic' | 'queues' | 'ledgers' | 'datalake'>('overview');
 
   const [strategies, setStrategies] = useState<TradingStrategy[]>([]);
   const [selectedStrategy, setSelectedStrategy] = useState<TradingStrategy | null>(null);
@@ -42,6 +44,11 @@ export default function App() {
   const [queueMatrices, setQueueMatrices] = useState<{ paper: QueueMatrixData; live: QueueMatrixData } | null>(null);
   const [isPaperTrading, setIsPaperTrading] = useState<boolean>(true);
   const [hasKrakenKeys, setHasKrakenKeys] = useState<boolean>(false);
+  const [hasKrakenSpotKeys, setHasKrakenSpotKeys] = useState<boolean>(false);
+  const [hasKrakenFuturesKeys, setHasKrakenFuturesKeys] = useState<boolean>(false);
+  const [krakenCredentialsStatus, setKrakenCredentialsStatus] = useState<KrakenDualCredentialsStatus | null>(null);
+  const [isKrakenOhlcStreamOnline, setIsKrakenOhlcStreamOnline] = useState<boolean>(true);
+  const [showKrakenCredentialsModal, setShowKrakenCredentialsModal] = useState<boolean>(false);
   const [isTogglingMode, setIsTogglingMode] = useState<boolean>(false);
   
   // Historical portfolio values for charting
@@ -89,19 +96,27 @@ export default function App() {
     if (data) {
       setIsPaperTrading(data.isPaperTrading);
       setHasKrakenKeys(data.hasCredentials);
+      if (data.hasSpotCredentials !== undefined) setHasKrakenSpotKeys(data.hasSpotCredentials);
+      if (data.hasFuturesCredentials !== undefined) setHasKrakenFuturesKeys(data.hasFuturesCredentials);
+      if (data.credentialsStatus) setKrakenCredentialsStatus(data.credentialsStatus);
     }
   };
 
   const fetchKrakenStatus = async () => {
-    const data = await safeFetchJson<{
-      connected: boolean;
-      hasCredentials: boolean;
-      paperTrading: boolean;
-      mode: string;
-    }>("/api/kraken/status");
+    const data = await safeFetchJson<KrakenStatusResponse>("/api/kraken/status");
     if (data) {
       setIsPaperTrading(data.paperTrading);
       setHasKrakenKeys(data.hasCredentials);
+      if (data.hasSpotCredentials !== undefined) setHasKrakenSpotKeys(data.hasSpotCredentials);
+      if (data.hasFuturesCredentials !== undefined) setHasKrakenFuturesKeys(data.hasFuturesCredentials);
+      if (data.credentialsStatus) setKrakenCredentialsStatus(data.credentialsStatus);
+      if (data.ohlcStreamConnected !== undefined) {
+        setIsKrakenOhlcStreamOnline(data.ohlcStreamConnected);
+      } else if (data.connected !== undefined) {
+        setIsKrakenOhlcStreamOnline(data.connected);
+      }
+    } else {
+      setIsKrakenOhlcStreamOnline(false);
     }
   };
 
@@ -148,12 +163,18 @@ export default function App() {
 
   const fetchStrategies = async () => {
     const data = await safeFetchJson<TradingStrategy[]>("/api/strategies");
-    if (data) {
-      setStrategies(data);
+    if (data && Array.isArray(data)) {
+      const sanitized = data.map((s, i) => ({
+        ...s,
+        id: s.id || `strat-${Date.now()}-${i}`,
+        name: s.name || `Strategy ${i + 1}`,
+        status: s.status || 'active'
+      }));
+      setStrategies(sanitized);
       setSelectedStrategy(prev => {
-        if (!prev && data.length > 0) return data[0];
+        if (!prev && sanitized.length > 0) return sanitized[0];
         if (prev) {
-          const matched = data.find(s => s.id === prev.id);
+          const matched = sanitized.find(s => s.id === prev.id);
           return matched || prev;
         }
         return null;
@@ -467,6 +488,23 @@ export default function App() {
             </button>
 
             <button
+              id="nav-tab-swarm"
+              onClick={() => setActivePage('swarm')}
+              className={`flex items-center space-x-2 px-3 py-1.5 rounded-md text-xs font-mono font-medium transition-all ${
+                activePage === 'swarm'
+                  ? 'bg-cyan-950/90 text-cyan-300 shadow-sm border border-cyan-500/70 font-bold'
+                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/60'
+              }`}
+            >
+              <Bot className="w-3.5 h-3.5 text-cyan-400" />
+              <span>The Swarm (Worker Bots)</span>
+              <span className="bg-cyan-950/80 text-cyan-300 border border-cyan-700/60 text-[9px] px-1.5 py-0.2 rounded font-bold uppercase tracking-wider flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-ping" />
+                <span>Autonomous</span>
+              </span>
+            </button>
+
+            <button
               id="nav-tab-backtesting"
               onClick={() => setActivePage('backtesting')}
               className={`flex items-center space-x-2 px-3.5 py-1.5 rounded-md text-xs font-mono font-medium transition-all ${
@@ -549,7 +587,63 @@ export default function App() {
         </div>
 
         {/* Global telemetry stats & Queue Status in header */}
-        <div className="flex items-center space-x-4 sm:space-x-5">
+        <div className="flex items-center space-x-3 sm:space-x-4">
+          {/* Kraken Dual API Status Badge (Spot & Futures) with Animated OHLC Stream Glow */}
+          <button
+            id="header-kraken-dual-keys-badge"
+            onClick={() => setShowKrakenCredentialsModal(true)}
+            className={`flex items-center bg-zinc-900/95 border rounded-lg px-2.5 py-1.5 space-x-2.5 shadow-sm transition-all text-left cursor-pointer group relative ${
+              isKrakenOhlcStreamOnline
+                ? 'kraken-stream-glow-green border-emerald-500/80 hover:border-emerald-400'
+                : 'kraken-stream-glow-red border-rose-500/80 hover:border-rose-400'
+            }`}
+            title={`Kraken Dual API & OHLC Stream: ${
+              isKrakenOhlcStreamOnline 
+                ? 'OHLC Stream ONLINE & CONNECTED (Glowing Green)' 
+                : 'OHLC Stream OFFLINE / DISCONNECTED (Glowing Red)'
+            } — Click to inspect credentials or test stream connection`}
+          >
+            <div className="relative shrink-0">
+              <Key className="w-3.5 h-3.5 text-amber-400 group-hover:scale-110 transition-transform" />
+              <span className="absolute -top-1 -right-1 flex h-2 w-2">
+                <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
+                  isKrakenOhlcStreamOnline ? 'bg-emerald-400' : 'bg-rose-400'
+                }`} />
+                <span className={`relative inline-flex rounded-full h-2 w-2 ${
+                  isKrakenOhlcStreamOnline ? 'bg-emerald-500' : 'bg-rose-500'
+                }`} />
+              </span>
+            </div>
+            <div className="flex flex-col">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[9px] font-mono text-zinc-300 uppercase tracking-widest leading-none font-semibold">Kraken API Keys</span>
+                <span className={`text-[8px] font-mono font-bold uppercase tracking-wider px-1 py-0.2 rounded border ${
+                  isKrakenOhlcStreamOnline 
+                    ? 'text-emerald-300 bg-emerald-950/90 border-emerald-700/70' 
+                    : 'text-rose-300 bg-rose-950/90 border-rose-700/70'
+                }`}>
+                  OHLC {isKrakenOhlcStreamOnline ? 'ONLINE' : 'OFFLINE'}
+                </span>
+              </div>
+              <div className="flex items-center space-x-1.5 mt-1">
+                <span className={`text-[9px] font-mono font-bold px-1.5 py-0.2 rounded border ${
+                  hasKrakenSpotKeys 
+                    ? 'bg-emerald-950/70 text-emerald-300 border-emerald-800/60' 
+                    : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+                }`}>
+                  Spot {hasKrakenSpotKeys ? '✓' : '•'}
+                </span>
+                <span className={`text-[9px] font-mono font-bold px-1.5 py-0.2 rounded border ${
+                  hasKrakenFuturesKeys 
+                    ? 'bg-cyan-950/70 text-cyan-300 border-cyan-800/60' 
+                    : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+                }`}>
+                  Futures {hasKrakenFuturesKeys ? '✓' : '•'}
+                </span>
+              </div>
+            </div>
+          </button>
+
           {/* Strategy Queue Status Badge - Pure Isolated Queue Display */}
           <div id="strategy-queue-indicator" className="flex items-center bg-zinc-900/90 border border-zinc-800/90 rounded-lg px-3 py-1.5 space-x-2.5 shadow-sm">
             <div className="flex flex-col text-left">
@@ -732,12 +826,22 @@ export default function App() {
                 </div>
 
                 {/* Active Automated Workers */}
-                <div className="bg-zinc-900 border border-zinc-800 p-4 rounded-lg shadow-sm">
+                <div 
+                  id="overview-automation-workers-card"
+                  onClick={() => setActivePage('swarm')}
+                  className="bg-zinc-900 border border-zinc-800 hover:border-cyan-500/60 p-4 rounded-lg shadow-sm cursor-pointer transition-all group"
+                  title="Klicken, um The Swarm & Autonomous Worker Bots zu öffnen"
+                >
                   <div className="flex justify-between items-start">
                     <div>
-                      <span className="text-[11px] font-mono text-zinc-400 uppercase tracking-wider block">
-                        Automation Workers
-                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[11px] font-mono text-zinc-400 uppercase tracking-wider block">
+                          Automation Workers
+                        </span>
+                        <span className="text-[9px] font-mono font-bold text-cyan-400 group-hover:translate-x-0.5 transition-transform">
+                          → Swarm
+                        </span>
+                      </div>
                       <div className="text-2xl font-mono font-bold text-white mt-1 flex items-baseline gap-2">
                         <span>{metrics?.activeWorkers || 0}</span>
                         <span className="text-xs font-mono text-zinc-400 font-normal">/ {strategies.length} active</span>
@@ -748,7 +852,7 @@ export default function App() {
                   <div className="text-[11px] font-mono text-zinc-400 mt-2 flex justify-between">
                     <span className="text-amber-400 font-semibold">{metrics?.paperWorkers ?? 0} Paper (L2)</span>
                     <span className="text-rose-400 font-semibold">{metrics?.liveWorkers ?? 0} Live (L4)</span>
-                    <span className="text-zinc-400">CPU: {metrics?.cpuUsage || 0}%</span>
+                    <span className="text-cyan-400 group-hover:underline">Öffnen ↗</span>
                   </div>
                 </div>
 
@@ -856,7 +960,7 @@ export default function App() {
                     </div>
 
                     <div className="space-y-2.5">
-                      {strategies.filter(s => s.status !== 'archived').map((strat) => {
+                      {strategies.filter(s => (s.status || 'active') !== 'archived').map((strat, idx) => {
                         const isActive = strat.status === 'active';
                         const isSelected = selectedStrategy?.id === strat.id;
                         // Mode priority: explicitly set strategy mode, or fallback to current global default queue
@@ -865,8 +969,8 @@ export default function App() {
 
                         return (
                           <div
-                            key={strat.id}
-                            id={`deployed-strat-card-${strat.id}`}
+                            key={strat.id ? `deployed-strat-${strat.id}` : `deployed-strat-idx-${idx}`}
+                            id={`deployed-strat-card-${strat.id || idx}`}
                             onClick={() => setSelectedStrategy(strat)}
                             className={`p-3 rounded-lg border transition-all cursor-pointer select-none ${
                               isSelected 
@@ -1017,7 +1121,11 @@ export default function App() {
               transition={{ duration: 0.18 }}
               className="max-w-7xl mx-auto"
             >
-              <SystemHealthPanel onRefresh={fetchLogsAndMetrics} />
+              <SystemHealthPanel 
+                onRefresh={fetchLogsAndMetrics} 
+                onOpenLedgers={() => setActivePage('ledgers')}
+                onOpenCredentialsModal={() => setShowKrakenCredentialsModal(true)}
+              />
             </motion.div>
           ) : activePage === 'regime' ? (
             /* ======================================================== */
@@ -1111,15 +1219,15 @@ export default function App() {
 
                   <div className="space-y-2 pr-1 max-h-[460px] overflow-y-auto terminal-scroll">
                     {strategies
-                      .filter(strat => manifestFilter === 'archived' ? strat.status === 'archived' : strat.status !== 'archived')
-                      .map((strat) => {
+                      .filter(strat => manifestFilter === 'archived' ? strat.status === 'archived' : (strat.status || 'active') !== 'archived')
+                      .map((strat, idx) => {
                       const isSelected = selectedStrategy?.id === strat.id;
                       const isActive = strat.status === 'active';
                       const isArchived = strat.status === 'archived';
 
                       return (
                         <motion.div
-                          key={strat.id}
+                          key={strat.id ? `manifest-strat-${strat.id}` : `manifest-strat-idx-${idx}`}
                           onClick={() => {
                             setAiGeneratedToInsert(null);
                             setSelectedStrategy(strat);
@@ -1325,6 +1433,25 @@ export default function App() {
                 </div>
               </div>
             </motion.div>
+          ) : activePage === 'swarm' ? (
+            /* ======================================================== */
+            /* THE SWARM: AUTONOMOUS WORKER BOTS & AI RESPAWN FLEET     */
+            /* ======================================================== */
+            <motion.div
+              key="swarm-page"
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.18 }}
+              className="max-w-7xl mx-auto"
+            >
+              <WorkerBotSwarmPanel
+                onSelectBot={(bot) => {
+                  const matched = strategies.find(s => s.assetPair === bot.pair);
+                  if (matched) setSelectedStrategy(matched);
+                }}
+              />
+            </motion.div>
           ) : activePage === 'backtesting' ? (
             /* ======================================================== */
             /* PAGE 3: STRATEGY BACKTESTING PAGE                        */
@@ -1414,6 +1541,10 @@ export default function App() {
               <KrakenLedgersPanel
                 isPaperTrading={isPaperTrading}
                 hasCredentials={hasKrakenKeys}
+                hasSpotCredentials={hasKrakenSpotKeys}
+                hasFuturesCredentials={hasKrakenFuturesKeys}
+                credentialsStatus={krakenCredentialsStatus}
+                onOpenCredentialsModal={() => setShowKrakenCredentialsModal(true)}
                 onRefreshTrigger={fetchKrakenStatus}
               />
             </motion.div>
@@ -1439,6 +1570,16 @@ export default function App() {
           )}
         </AnimatePresence>
       </main>
+
+      {/* Global Kraken Dual API Architecture Modal */}
+      <KrakenDualAuthModal
+        isOpen={showKrakenCredentialsModal}
+        onClose={() => setShowKrakenCredentialsModal(false)}
+        credentialsStatus={krakenCredentialsStatus}
+        onRefreshStatus={fetchKrakenStatus}
+        isOhlcStreamOnline={isKrakenOhlcStreamOnline}
+        onToggleOhlcStream={() => setIsKrakenOhlcStreamOnline(prev => !prev)}
+      />
     </div>
   );
 }

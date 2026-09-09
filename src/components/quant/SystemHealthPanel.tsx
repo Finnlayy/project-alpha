@@ -2,21 +2,44 @@ import { useState, useEffect } from "react";
 import { motion } from "motion/react";
 import { 
   Activity, ShieldAlert, Cpu, HardDrive, Zap, Radio, RefreshCw, 
-  AlertTriangle, CheckCircle2, XCircle, Play, Pause, Flame, Server
+  AlertTriangle, CheckCircle2, XCircle, Play, Pause, Flame, Server, Eye
 } from "lucide-react";
+import { FuturesPnLHealthMetric } from "./FuturesPnLHealthMetric";
+import { WatchdogBufferedEventsModal } from "./WatchdogBufferedEventsModal";
+import { WatchdogBufferedEvent } from "../../types";
 
 interface SystemHealthPanelProps {
   onRefresh?: () => void;
+  onOpenLedgers?: () => void;
+  onOpenCredentialsModal?: () => void;
 }
 
-export function SystemHealthPanel({ onRefresh }: SystemHealthPanelProps) {
+export function SystemHealthPanel({ onRefresh, onOpenLedgers, onOpenCredentialsModal }: SystemHealthPanelProps) {
   const [telemetry, setTelemetry] = useState<any>(null);
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [lastPing, setLastPing] = useState<number>(Date.now());
   const [isChangingState, setIsChangingState] = useState<boolean>(false);
   const [emergencyReason, setEmergencyReason] = useState<string>("");
+  const [showWatchdogEventsModal, setShowWatchdogEventsModal] = useState<boolean>(false);
+  const [watchdogBufferedEvents, setWatchdogBufferedEvents] = useState<WatchdogBufferedEvent[]>([]);
 
   useEffect(() => {
+    // Initial fetch of watchdog buffered events
+    const fetchBufferedEvents = async () => {
+      try {
+        const res = await fetch("/api/quant/watchdog/buffered-events");
+        if (res.ok) {
+          const json = await res.json();
+          if (json?.events && Array.isArray(json.events)) {
+            setWatchdogBufferedEvents(json.events);
+          }
+        }
+      } catch (err) {
+        console.error("Failed to fetch initial watchdog events:", err);
+      }
+    };
+    fetchBufferedEvents();
+
     // Connect to Server-Sent Events (SSE) stream
     const eventSource = new EventSource("/api/quant/telemetry/stream");
 
@@ -29,6 +52,9 @@ export function SystemHealthPanel({ onRefresh }: SystemHealthPanelProps) {
         const data = JSON.parse(event.data);
         setTelemetry(data);
         setLastPing(Date.now());
+        if (data?.watchdog?.buffered_events && Array.isArray(data.watchdog.buffered_events)) {
+          setWatchdogBufferedEvents(data.watchdog.buffered_events);
+        }
       } catch (err) {
         console.error("Failed to parse SSE telemetry:", err);
       }
@@ -61,6 +87,17 @@ export function SystemHealthPanel({ onRefresh }: SystemHealthPanelProps) {
       console.error("Failed to transition state machine:", err);
     } finally {
       setIsChangingState(false);
+    }
+  };
+
+  const handleFlushWatchdogBuffer = async () => {
+    try {
+      const res = await fetch("/api/quant/watchdog/flush", { method: "POST" });
+      if (res.ok) {
+        setWatchdogBufferedEvents([]);
+      }
+    } catch (err) {
+      console.error("Failed to flush watchdog buffer:", err);
     }
   };
 
@@ -324,19 +361,49 @@ export function SystemHealthPanel({ onRefresh }: SystemHealthPanelProps) {
                 <span className="text-slate-400">Heartbeat Latency:</span>
                 <span className="font-mono text-cyan-300">{watchdog.seconds_since_last_heartbeat?.toFixed(2) || "0.15"}s</span>
               </div>
-              <div className="flex justify-between text-slate-300">
+              <div className="flex items-center justify-between text-slate-300">
                 <span className="text-slate-400">Event Buffer:</span>
-                <span className="font-mono text-slate-200">{telemetry?.recent_logs?.length || 25} queued</span>
+                <div className="flex items-center gap-1.5">
+                  <span className="font-mono text-cyan-300 text-xs font-semibold">
+                    {watchdogBufferedEvents.length > 0 ? watchdogBufferedEvents.length : (telemetry?.recent_logs?.length || 25)} queued
+                  </span>
+                  <button
+                    id="btn-view-watchdog-buffered-events"
+                    onClick={() => setShowWatchdogEventsModal(true)}
+                    className="px-2 py-0.5 rounded text-[11px] font-mono font-medium bg-cyan-950/90 hover:bg-cyan-900 text-cyan-300 border border-cyan-700/70 hover:border-cyan-400 transition-all flex items-center gap-1 cursor-pointer shadow-sm active:scale-95"
+                    title="Gebufferte Watchdog-Events im Pop-up-Fenster anzeigen"
+                  >
+                    <Eye className="w-3 h-3 text-cyan-400" />
+                    <span>Puffer ansehen</span>
+                  </button>
+                </div>
               </div>
             </div>
           </div>
 
-          <div className="mt-4 pt-3 border-t border-slate-800/80 flex justify-between text-[11px] text-slate-400">
+          <div className="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-400">
             <span>Timeout Gate: <strong className="text-slate-200 font-mono">10.0s</strong></span>
-            <span>Pulsing: <strong className="text-emerald-400 font-mono">&lt; 150ms</strong></span>
+            <button
+              id="btn-open-watchdog-buffer-modal-bottom"
+              onClick={() => setShowWatchdogEventsModal(true)}
+              className="text-cyan-400 hover:text-cyan-300 font-mono font-medium flex items-center gap-1 hover:underline cursor-pointer bg-cyan-950/40 hover:bg-cyan-950/80 px-2 py-0.5 rounded border border-cyan-800/50 transition-colors"
+              title="M-17 Watchdog Event-Puffer Pop-up öffnen"
+            >
+              <Eye className="w-3 h-3 text-cyan-400" />
+              <span>Events ({watchdogBufferedEvents.length > 0 ? watchdogBufferedEvents.length : 25})</span>
+            </button>
           </div>
         </div>
       </div>
+
+      {/* PILLAR 5 / MODUL 08: Futures Unrealized P&L & Derivatives Risk Monitor (Distinguished from Spot Holdings) */}
+      <FuturesPnLHealthMetric
+        telemetryFuturesRisk={telemetry?.futures_risk}
+        telemetrySpotVault={telemetry?.spot_vault}
+        onOpenLedgers={onOpenLedgers}
+        onOpenCredentialsModal={onOpenCredentialsModal}
+        onRefreshParent={onRefresh}
+      />
 
       {/* Real-time Non-Blocking Telemetry Event Log Table */}
       <div className="bg-slate-900/80 border border-slate-800/80 rounded-xl overflow-hidden shadow-sm">
@@ -385,6 +452,19 @@ export function SystemHealthPanel({ onRefresh }: SystemHealthPanelProps) {
           )}
         </div>
       </div>
+
+      {/* Pop-up-Fenster für gebufferte Watchdog-Events */}
+      <WatchdogBufferedEventsModal
+        isOpen={showWatchdogEventsModal}
+        onClose={() => setShowWatchdogEventsModal(false)}
+        bufferedEvents={watchdogBufferedEvents}
+        onFlushBuffer={handleFlushWatchdogBuffer}
+        onRefresh={() => {
+          fetch("/api/quant/watchdog/buffered-events")
+            .then(res => res.json())
+            .then(data => data?.events && setWatchdogBufferedEvents(data.events));
+        }}
+      />
     </div>
   );
 }

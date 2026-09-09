@@ -24,3 +24,34 @@
 .terminal-scroll::-webkit-scrollbar-thumb:hover {
   background: rgba(16, 185, 129, 0.4);
 }
+
+/* Kraken OHLC Stream Animation Glows */
+@keyframes krakenGlowPulseGreen {
+  0%, 100% {
+    box-shadow: 0 0 12px rgba(16, 185, 129, 0.45), 0 0 3px rgba(16, 185, 129, 0.75), inset 0 0 8px rgba(16, 185, 129, 0.15);
+    border-color: rgba(16, 185, 129, 0.65);
+  }
+  50% {
+    box-shadow: 0 0 26px rgba(16, 185, 129, 0.85), 0 0 42px rgba(16, 185, 129, 0.4), inset 0 0 14px rgba(16, 185, 129, 0.3);
+    border-color: rgba(52, 211, 153, 0.95);
+  }
+}
+
+@keyframes krakenGlowPulseRed {
+  0%, 100% {
+    box-shadow: 0 0 12px rgba(239, 68, 68, 0.45), 0 0 3px rgba(239, 68, 68, 0.8), inset 0 0 8px rgba(239, 68, 68, 0.15);
+    border-color: rgba(239, 68, 68, 0.65);
+  }
+  50% {
+    box-shadow: 0 0 26px rgba(239, 68, 68, 0.9), 0 0 42px rgba(239, 68, 68, 0.45), inset 0 0 14px rgba(239, 68, 68, 0.3);
+    border-color: rgba(248, 113, 113, 0.95);
+  }
+}
+
+.kraken-stream-glow-green {
+  animation: krakenGlowPulseGreen 2.2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+.kraken-stream-glow-red {
+  animation: krakenGlowPulseRed 1.8s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}

@@ -42,6 +42,8 @@ export function formatTimeframe(intervalMinutesOrSecs?: number | null): string {
 export interface MarketTicker {
   pair: string;
   price: number;
+  symbol?: string;
+  lastPrice?: number;
   change24h: number;
   high: number;
   low: number;
@@ -230,9 +232,32 @@ export interface KrakenProPosition {
   status: 'open' | 'closed';
 }
 
+export interface KrakenCredentialDetails {
+  configured: boolean;
+  keyPreview?: string;
+  source?: 'env' | 'simulated';
+  apiDomain: string; // 'api.kraken.com' (Spot) vs 'futures.kraken.com' (Futures)
+  displayName: string;
+  description: string;
+  permissions?: string[];
+  lastValidated?: string;
+}
+
+export interface KrakenDualCredentialsStatus {
+  hasSpotCredentials: boolean;
+  hasFuturesCredentials: boolean;
+  bothConfigured: boolean;
+  anyConfigured: boolean;
+  spot: KrakenCredentialDetails;
+  futures: KrakenCredentialDetails;
+}
+
 export interface KrakenAccountLedgers {
   mode: 'paper' | 'live';
   hasCredentials: boolean;
+  hasSpotCredentials?: boolean;
+  hasFuturesCredentials?: boolean;
+  credentialsStatus?: KrakenDualCredentialsStatus;
   lastSync: string;
   spot: {
     totalValueUSD: number;
@@ -252,6 +277,31 @@ export interface KrakenAccountLedgers {
     effectiveLeverage: number;
     positions: KrakenProPosition[];
   };
+}
+
+export interface FuturesRiskTelemetry {
+  total_unrealized_pnl_usd: number;
+  unrealized_pnl_percent: number;
+  total_collateral_usd: number;
+  free_margin_usd: number;
+  used_margin_usd: number;
+  margin_level_percent: number;
+  effective_leverage: number;
+  open_positions_count: number;
+  nearest_liquidation_distance_percent: number;
+  daily_funding_fee_est_usd?: number;
+  m8_gate_status?: string;
+}
+
+export interface SpotVaultTelemetry {
+  total_value_usd: number;
+  free_cash_usd: number;
+  crypto_value_usd: number;
+  change_24h_usd: number;
+  change_24h_percent: number;
+  assets_count: number;
+  leverage: number;
+  liquidation_risk: string;
 }
 
 export interface RunnerMetrics {
@@ -274,6 +324,9 @@ export interface RunnerMetrics {
   paperBalances?: Record<string, number>;
   liveKrakenBalances?: Record<string, number>;
   hasCredentials?: boolean;
+  hasSpotCredentials?: boolean;
+  hasFuturesCredentials?: boolean;
+  credentialsStatus?: KrakenDualCredentialsStatus;
 }
 
 export interface StrategyManifest {
@@ -399,17 +452,29 @@ export interface BacktestSummary {
   totalFeesPaid: number;
 }
 
+export interface BacktestAITweakItem {
+  parameter?: string;
+  currentValue?: string | number;
+  suggestedValue?: string | number;
+  rationale?: string;
+  description?: string;
+}
+
 export interface BacktestAIAnalysis {
-  score: number;
-  verdict: 'Exceptional' | 'Viable' | 'Needs Optimization' | 'High Risk';
+  score?: number;
+  verdict?: 'Exceptional' | 'Viable' | 'Needs Optimization' | 'High Risk' | string;
+  confidenceScore?: number;
   executiveSummary: string;
+  overallAssessment?: string;
   regimePerformance: {
     trendingUp: string;
     trendingDown: string;
-    choppyRange: string;
+    choppyRange?: string;
+    choppyVolatile?: string;
   };
-  drawdownDiagnosis: string;
-  recommendedTweaks: string[];
+  drawdownDiagnosis?: string;
+  recommendedTweaks: Array<string | BacktestAITweakItem>;
+  riskWarnings?: string[];
   suggestedParameters?: Record<string, any>;
 }
 
@@ -543,3 +608,18 @@ export interface GeneticOptimizationResult {
     isBetter: boolean;
   };
 }
+
+export interface WatchdogBufferedEvent {
+  id: string;
+  timestamp: number;
+  timeFormatted: string;
+  module: string;
+  type: 'HEARTBEAT_ACK' | 'FRAME_BUFFER_TICK' | 'LATENCY_PROBE' | 'QUEUE_DRAIN' | 'STREAM_KEEPALIVE' | 'CIRCUIT_BREAKER_CHECK' | 'MEMORY_SYNC';
+  severity: 'OK' | 'INFO' | 'WARN' | 'DEBUG';
+  latency_ms: number;
+  details: string;
+  source: string;
+  payload_bytes?: number;
+}
+
+export * from './types/trading';
