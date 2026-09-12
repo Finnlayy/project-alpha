@@ -49,7 +49,8 @@ function getFallbackMock<T>(url: string): T | null {
   if (path === "/api/dashboard/init") return mockDashboardInit as unknown as T;
   if (path === "/api/kraken/status") return mockKrakenStatus as unknown as T;
   if (path === "/api/strategies") return mockStrategies as unknown as T;
-  if (path === "/api/market-data") return mockTickers as unknown as T;
+  // Zero-Dummy Guarantee: Never return fake market ticker prices on network failures
+  if (path === "/api/market-data") return null;
   if (path === "/api/logs") return {
     logs: mockLogs,
     metrics: mockMetrics,

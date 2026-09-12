@@ -56,7 +56,25 @@ export interface WorkerBotData {
 
   // Respawn / Lineage Telemetry
   spawnedFrom?: string;
+  spawnedAt?: string | Date;
   regime?: string;
+  historicalOrigin?: BotHistoricalOrigin;
+}
+
+export interface BotHistoricalOrigin {
+  sessionId: string;
+  sessionName: string;
+  stoppedAt: string;
+  sourceRegime: string;
+  sourceRoi: number;
+  sourcePnl: number;
+  sourceStrategy: string;
+  sourceLeverage: number;
+  sourceInvestment: number;
+  configSourceTable: string; // e.g. "bot_history (SQLite/Parquet Lake)"
+  cloningRationale?: string;
+  leverageDelta?: number; // e.g. 0 or -2
+  investmentDelta?: number;
 }
 
 export interface HistoricalBotSession {
@@ -68,6 +86,59 @@ export interface HistoricalBotSession {
   roi: number;
   stopped_at: string;
   config: Partial<WorkerBotData> & Record<string, any>;
+}
+
+export interface StrategyConfigAtSpawn {
+  botId: string;
+  botName: string;
+  pair: string;
+  exchange: string;
+  status: WorkerBotStatus;
+  direction: WorkerTradeDirection;
+  strategy: string;
+  leverage: number;
+  investment: number;
+  spawnedAt: string;
+  spawnedFrom: string;
+  historicalRecord: {
+    id: string;
+    name: string;
+    pair: string;
+    regime: string;
+    final_pnl: number;
+    roi: number;
+    stopped_at: string;
+    sourceStrategy: string;
+    configSourceTable: string;
+    rawConfig: Record<string, any>;
+  };
+  entryLogic: {
+    regimeCondition: string;
+    signalFilter: string;
+    hurstThreshold: string;
+    kellyFraction: string;
+    orderType: string;
+    initialEntryPrice?: number;
+  };
+  executionLogic: {
+    dcaSteps: number;
+    dcaRangeMin: number;
+    dcaRangeMax: number;
+    distributionModel: string;
+    takeProfitTarget: string;
+    stopLossCutoff: string;
+    maxDrawdownLimit: string;
+    rebalanceCadence: string;
+  };
+  riskControls: {
+    marginType: string;
+    liquidationPrice: number;
+    liquidationDistancePct: number;
+    feeHurdleRatio: string;
+    maxLeverageCap: number;
+  };
+  rationale: string;
+  rawConfig: Record<string, any>;
 }
 
 export interface SpawnFromHistoryPayload {

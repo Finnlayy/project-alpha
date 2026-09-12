@@ -29,7 +29,10 @@ import {
   CheckCircle2, 
   SlidersHorizontal,
   ChevronRight,
-  Tag
+  Tag,
+  AlertCircle,
+  Wifi,
+  WifiOff
 } from "lucide-react";
 import { MarketTicker, TradeOrder, KrakenSymbolInfo } from "../types";
 import KrakenSymbolModal from "./KrakenSymbolModal";
@@ -84,6 +87,9 @@ export default function MarketPanel({ tickers, orders, portfolioHistory, onReset
   // Historical price chart data
   const [chartCandles, setChartCandles] = useState<PricePoint[]>([]);
   const [isLoadingChart, setIsLoadingChart] = useState(false);
+  const [ohlcError, setOhlcError] = useState<string | null>(null);
+  const [isWsStreaming, setIsWsStreaming] = useState<boolean>(true);
+  const [lastStreamEventTime, setLastStreamEventTime] = useState<string | null>(null);
 
   // Kraken Symbols Directory Modal state
   const [isSymbolModalOpen, setIsSymbolModalOpen] = useState(false);
@@ -97,9 +103,10 @@ export default function MarketPanel({ tickers, orders, portfolioHistory, onReset
     }
   }, [tickers, selectedPair]);
 
-  // Fetch OHLC candles for the selected pair
+  // Fetch OHLC candles for the selected pair (Zero-Dummy Guarantee: 100% Real Kraken Feed)
   const fetchOHLC = async (pair: string, intervalMin: number) => {
     setIsLoadingChart(true);
+    setOhlcError(null);
     try {
       const data = await safeFetchJson<{
         pair: string;
@@ -114,7 +121,8 @@ export default function MarketPanel({ tickers, orders, portfolioHistory, onReset
           volume: number;
           timestamp: string;
         }>;
-      }>(`/api/backtest/ohlc?pair=${encodeURIComponent(pair)}&interval=${intervalMin}&count=80`, undefined, 5000);
+        error?: string;
+      }>(`/api/backtest/ohlc?pair=${encodeURIComponent(pair)}&interval=${intervalMin}&count=80`, undefined, 8000);
 
       if (data && Array.isArray(data.candles) && data.candles.length > 0) {
         const points: PricePoint[] = data.candles.map(c => {
@@ -133,32 +141,17 @@ export default function MarketPanel({ tickers, orders, portfolioHistory, onReset
           };
         });
         setChartCandles(points);
+        setOhlcError(null);
       } else {
-        // Synthesize fallback baseline points around the ticker price if API returns empty
-        const curTicker = tickers.find(t => t.pair === pair);
-        const basePrice = curTicker?.price || (pair.includes('BTC') ? 85000 : pair.includes('ETH') ? 2900 : 160);
-        const now = Date.now();
-        const fallbackPoints: PricePoint[] = [];
-        for (let i = 40; i >= 0; i--) {
-          const t = new Date(now - i * intervalMin * 60 * 1000);
-          const noise = (Math.sin(i / 3) * 0.008 + (Math.random() - 0.5) * 0.004) * basePrice;
-          const p = Number((basePrice + noise).toFixed(2));
-          fallbackPoints.push({
-            time: t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
-            fullTimestamp: t.toISOString(),
-            timestampMs: t.getTime(),
-            price: p,
-            open: p * 0.999,
-            high: p * 1.002,
-            low: p * 0.998,
-            close: p,
-            volume: Math.floor(Math.random() * 50 + 10)
-          });
-        }
-        setChartCandles(fallbackPoints);
+        // Zero-Dummy Guarantee: Absolutely NO synthetic fallback, fake sine noise or stubs
+        const errMsg = data?.error || `Kraken OHLC Stream lieferte keine Daten für ${pair}. Gemäß Zero-Dummy-Garantie werden keine fiktiven Ersatzdaten generiert.`;
+        setOhlcError(errMsg);
+        setChartCandles([]);
       }
-    } catch (err) {
-      console.error("Failed to load OHLC chart candles:", err);
+    } catch (err: any) {
+      console.error("Failed to load real Kraken OHLC candles:", err);
+      setOhlcError(`Verbindungsfehler zum Kraken OHLC Feed: ${err?.message || String(err)}`);
+      setChartCandles([]);
     } finally {
       setIsLoadingChart(false);
     }
@@ -166,6 +159,95 @@ export default function MarketPanel({ tickers, orders, portfolioHistory, onReset
 
   useEffect(() => {
     fetchOHLC(selectedPair, interval);
+  }, [selectedPair, interval]);
+
+  // Live Kraken Real-time SSE Stream (OHLC candle ticks & bar updates)
+  useEffect(() => {
+    let es: EventSource | null = null;
+    let reconnectTimeout: any = null;
+
+    const connectSSE = () => {
+      try {
+        es = new EventSource('/api/kraken/stream');
+
+        es.onopen = () => {
+          setIsWsStreaming(true);
+        };
+
+        es.onmessage = (event) => {
+          try {
+            const payload = JSON.parse(event.data);
+            if (payload.type === 'ohlc_bar' && payload.bar) {
+              const bar = payload.bar;
+              setLastStreamEventTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }));
+              
+              // Normalize pair comparison
+              const selClean = selectedPair.replace(/[^A-Z]/g, '').replace('XBT', 'BTC');
+              const barClean = (bar.symbol || '').replace(/[^A-Z]/g, '').replace('XBT', 'BTC');
+
+              if (selClean === barClean || selClean.includes(barClean) || barClean.includes(selClean)) {
+                setChartCandles(prev => {
+                  if (prev.length === 0) return prev;
+                  const lastIdx = prev.length - 1;
+                  const last = prev[lastIdx];
+                  const barTimeSec = bar.time || Math.floor((bar.timestamp || Date.now()) / 1000);
+                  const barMs = barTimeSec * 1000;
+                  const dateObj = new Date(barMs);
+                  const timeLabel = dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+
+                  // Update current bar if within interval window, else append new candle
+                  if (Math.abs(barMs - last.timestampMs) < interval * 60 * 1000) {
+                    const updated = [...prev];
+                    updated[lastIdx] = {
+                      ...last,
+                      price: bar.close,
+                      close: bar.close,
+                      high: Math.max(last.high, bar.high),
+                      low: Math.min(last.low, bar.low),
+                      volume: +(last.volume + (bar.volume || 0)).toFixed(4)
+                    };
+                    return updated;
+                  } else if (barMs > last.timestampMs) {
+                    return [...prev.slice(-119), {
+                      time: timeLabel,
+                      fullTimestamp: dateObj.toISOString(),
+                      timestampMs: barMs,
+                      price: bar.close,
+                      open: bar.open,
+                      high: bar.high,
+                      low: bar.low,
+                      close: bar.close,
+                      volume: bar.volume || 0
+                    }];
+                  }
+                  return prev;
+                });
+              }
+            } else if (payload.type === 'ticker' || payload.type === 'snapshot') {
+              setIsWsStreaming(true);
+              setLastStreamEventTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }));
+            }
+          } catch {
+            // Ignore parse errors
+          }
+        };
+
+        es.onerror = () => {
+          setIsWsStreaming(false);
+          es?.close();
+          reconnectTimeout = setTimeout(connectSSE, 4000);
+        };
+      } catch {
+        setIsWsStreaming(false);
+      }
+    };
+
+    connectSSE();
+
+    return () => {
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+      es?.close();
+    };
   }, [selectedPair, interval]);
 
   const fetchKrakenSymbols = async () => {
@@ -508,27 +590,45 @@ export default function MarketPanel({ tickers, orders, portfolioHistory, onReset
                 </button>
               </div>
 
-              {/* Queue Isolator Filter */}
-              <div className="flex items-center space-x-1.5">
-                <span className="text-zinc-500 text-[9px] uppercase">Queue:</span>
-                {(['all', 'paper', 'live'] as const).map(q => (
-                  <button
-                    key={q}
-                    type="button"
-                    onClick={() => setQueueFilter(q)}
-                    className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase transition-colors ${
-                      queueFilter === q
-                        ? q === 'live'
-                          ? 'bg-rose-950 text-rose-300 border border-rose-700'
-                          : q === 'paper'
-                          ? 'bg-amber-950 text-amber-300 border border-amber-700'
-                          : 'bg-zinc-800 text-zinc-200 border border-zinc-700'
-                        : 'text-zinc-500 hover:text-zinc-300 border border-transparent'
-                    }`}
-                  >
-                    {q}
-                  </button>
-                ))}
+              {/* Kraken Live Stream Status & Queue Isolator Filter */}
+              <div className="flex flex-wrap items-center gap-2">
+                <div className={`flex items-center space-x-1.5 px-2 py-0.5 rounded text-[9px] border font-mono ${
+                  isWsStreaming 
+                    ? 'bg-emerald-950/60 border-emerald-800/80 text-emerald-300' 
+                    : 'bg-amber-950/60 border-amber-800/80 text-amber-300'
+                }`}>
+                  {isWsStreaming ? (
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  ) : (
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                  )}
+                  <span>Kraken WS-v2: {isWsStreaming ? 'STREAMING' : 'CONNECTING'}</span>
+                  {lastStreamEventTime && (
+                    <span className="text-zinc-500 ml-1">({lastStreamEventTime})</span>
+                  )}
+                </div>
+
+                <div className="flex items-center space-x-1.5">
+                  <span className="text-zinc-500 text-[9px] uppercase">Queue:</span>
+                  {(['all', 'paper', 'live'] as const).map(q => (
+                    <button
+                      key={q}
+                      type="button"
+                      onClick={() => setQueueFilter(q)}
+                      className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase transition-colors ${
+                        queueFilter === q
+                          ? q === 'live'
+                            ? 'bg-rose-950 text-rose-300 border border-rose-700'
+                            : q === 'paper'
+                            ? 'bg-amber-950 text-amber-300 border border-amber-700'
+                            : 'bg-zinc-800 text-zinc-200 border border-zinc-700'
+                          : 'text-zinc-500 hover:text-zinc-300 border border-transparent'
+                      }`}
+                    >
+                      {q}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
 
@@ -538,7 +638,29 @@ export default function MarketPanel({ tickers, orders, portfolioHistory, onReset
                 <div className="absolute inset-0 z-10 flex items-center justify-center bg-zinc-950/70 backdrop-blur-xs rounded">
                   <div className="flex items-center space-x-2 text-zinc-400 text-xs">
                     <RotateCcw className="w-3.5 h-3.5 animate-spin text-emerald-400" />
-                    <span>Loading {selectedPair} timeseries...</span>
+                    <span>Loading authentic Kraken {selectedPair} timeseries...</span>
+                  </div>
+                </div>
+              )}
+
+              {!isLoadingChart && ohlcError && chartCandles.length === 0 && (
+                <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-zinc-950/95 border border-rose-900/60 rounded p-4 text-center">
+                  <AlertCircle className="w-7 h-7 text-rose-500 mb-2" />
+                  <span className="text-zinc-200 font-bold text-xs">Kraken OHLC Stream Fehler</span>
+                  <p className="text-zinc-400 text-[11px] mt-1 max-w-md">
+                    {ohlcError}
+                  </p>
+                  <div className="mt-3 flex items-center space-x-3 text-[11px]">
+                    <span className="text-amber-300 bg-amber-950/50 border border-amber-800/80 px-2 py-1 rounded">
+                      ⚠️ Zero-Dummy-Garantie: Keine synthetischen Falschwerte
+                    </span>
+                    <button
+                      onClick={() => fetchOHLC(selectedPair, interval)}
+                      className="px-2.5 py-1 bg-sky-600 hover:bg-sky-500 text-white rounded font-medium flex items-center space-x-1 cursor-pointer transition-colors"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      <span>Erneut abrufen</span>
+                    </button>
                   </div>
                 </div>
               )}

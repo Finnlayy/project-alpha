@@ -2,7 +2,7 @@ import React, { useMemo } from "react";
 import { 
   Bot, Play, Pause, TrendingUp, TrendingDown, Target, 
   DollarSign, ShieldAlert, Clock, Zap, CheckCircle2, 
-  AlertTriangle, ShieldCheck, GitFork
+  AlertTriangle, ShieldCheck, GitFork, Database, Eye, Code2
 } from "lucide-react";
 import { WorkerBotData } from "../types/trading";
 
@@ -11,6 +11,8 @@ interface WorkerBotCardProps {
   onToggleStatus?: (id: string) => void;
   onSelect?: (bot: WorkerBotData) => void;
   onClone?: (bot: WorkerBotData) => void;
+  onInspectOrigin?: (bot: WorkerBotData) => void;
+  onViewLogic?: (bot: WorkerBotData) => void;
   isSelected?: boolean;
 }
 
@@ -19,6 +21,8 @@ export const WorkerBotCard: React.FC<WorkerBotCardProps> = ({
   onToggleStatus,
   onSelect,
   onClone,
+  onInspectOrigin,
+  onViewLogic,
   isSelected = false
 }) => {
   const isPositiveUnrealized = bot.unrealizedPnL.value >= 0;
@@ -202,6 +206,70 @@ export const WorkerBotCard: React.FC<WorkerBotCardProps> = ({
             <span className="px-2 py-0.5 rounded text-[10px] font-bold font-mono bg-purple-950/80 border border-purple-700/60 text-purple-300">
               {bot.leverage}×
             </span>
+          </div>
+        </div>
+
+        {/* ======================================================== */}
+        {/* 2a. HISTORICAL ORIGIN & DATABASE LINEAGE (ZERO-DUMMY)    */}
+        {/* ======================================================== */}
+        <div className="p-2.5 rounded-lg bg-zinc-950/80 border border-purple-900/40 text-xs flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="p-1.5 rounded-md bg-purple-950/80 border border-purple-850 text-purple-300 shrink-0">
+              <Database className="w-3.5 h-3.5" />
+            </div>
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-[10px] text-zinc-400 font-bold uppercase tracking-wider">
+                  Origin:
+                </span>
+                <span className="text-[11px] font-bold text-purple-300 font-mono truncate">
+                  {bot.historicalOrigin?.sessionId || bot.spawnedFrom || "GENESIS_SEED"}
+                </span>
+                <span className="text-[9px] px-1 py-0.2 rounded bg-purple-950/60 border border-purple-800/60 text-purple-200 uppercase font-semibold">
+                  {bot.historicalOrigin?.sourceRegime || bot.regime || "persistent_trending"}
+                </span>
+              </div>
+              <div className="text-[10px] text-zinc-400 truncate mt-0.5">
+                {bot.historicalOrigin ? (
+                  <span>
+                    Baseline: <strong className="text-emerald-400">+{bot.historicalOrigin.sourceRoi}% ROI</strong> (${bot.historicalOrigin.sourcePnl.toFixed(0)}) in <span className="text-zinc-300">bot_history</span>
+                  </span>
+                ) : (
+                  <span>DB Source: <strong className="text-zinc-300">bot_history</strong> (Primary Config)</span>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-1.5 shrink-0">
+            {onViewLogic && (
+              <button
+                id={`card-view-logic-btn-${bot.id}`}
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onViewLogic(bot);
+                }}
+                className="px-2 py-1 rounded bg-cyan-950/80 hover:bg-cyan-900 border border-cyan-750 text-cyan-200 text-[10px] font-bold transition-all flex items-center gap-1 cursor-pointer shadow-xs active:scale-95"
+                title="Spawning-Strategiekonfiguration und Logik anzeigen"
+              >
+                <Code2 className="w-3 h-3 text-cyan-400" />
+                <span>Logic</span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onInspectOrigin?.(bot);
+              }}
+              className="px-2 py-1 rounded bg-purple-950/70 hover:bg-purple-900 border border-purple-750 text-purple-200 text-[10px] font-bold transition-all flex items-center gap-1 shrink-0 cursor-pointer"
+              title="Historischen Ursprung & Orchestrator Klon-Entscheidung analysieren"
+            >
+              <Eye className="w-3 h-3 text-purple-400" />
+              <span>Audit</span>
+            </button>
           </div>
         </div>
 

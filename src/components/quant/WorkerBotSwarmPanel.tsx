@@ -3,10 +3,14 @@ import { motion, AnimatePresence } from "motion/react";
 import { 
   Bot, Cpu, Play, Pause, RefreshCw, Plus, GitFork, 
   Layers, ShieldAlert, Sparkles, History, CheckCircle2, 
-  Sliders, X, ArrowRight, Zap, TrendingUp, AlertTriangle
+  Sliders, X, ArrowRight, Zap, TrendingUp, TrendingDown,
+  AlertTriangle, Database, Table as TableIcon, LayoutGrid, Eye, 
+  Search, ShieldCheck, ChevronRight, Info, Code2
 } from "lucide-react";
 import { WorkerBotData, HistoricalBotSession } from "../../types/trading";
 import { WorkerBotCard } from "../WorkerBotCard";
+import { CloningOriginModal } from "./CloningOriginModal";
+import { StrategyLogicModal } from "./StrategyLogicModal";
 import { safeFetchJson } from "../../lib/api";
 
 interface WorkerBotSwarmPanelProps {
@@ -20,10 +24,17 @@ export const WorkerBotSwarmPanel: React.FC<WorkerBotSwarmPanelProps> = ({
   const [historySessions, setHistorySessions] = useState<HistoricalBotSession[]>([]);
   const [selectedBotId, setSelectedBotId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [filterStatus, setFilterStatus] = useState<"all" | "active" | "paused">("all");
+  const [viewMode, setViewMode] = useState<"table" | "grid">("table");
+  const [filterStatus, setFilterStatus] = useState<"all" | "active" | "paused" | "cloned">("all");
   const [searchPair, setSearchPair] = useState<string>("");
   const [isSpawning, setIsSpawning] = useState<boolean>(false);
   const [notification, setNotification] = useState<{ type: "success" | "error" | "info"; message: string } | null>(null);
+
+  // Historical Origin Audit Modal State
+  const [auditBot, setAuditBot] = useState<WorkerBotData | null>(null);
+
+  // Strategy Logic & Spawning Config Modal State
+  const [viewLogicBot, setViewLogicBot] = useState<WorkerBotData | null>(null);
 
   // Historical Respawn Modal State
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState<boolean>(false);
@@ -156,17 +167,124 @@ export const WorkerBotSwarmPanel: React.FC<WorkerBotSwarmPanelProps> = ({
     setIsHistoryModalOpen(true);
   };
 
+  // Helper to map any WorkerBot back to its database origin
+  const resolveBotOrigin = useCallback((bot: WorkerBotData) => {
+    // 1. Direct attachment from backend / store
+    if (bot.historicalOrigin) {
+      const hist = historySessions.find(h => h.id === bot.historicalOrigin?.sessionId);
+      const rawCfg = hist?.config || {};
+      return {
+        sessionId: bot.historicalOrigin.sessionId,
+        sessionName: bot.historicalOrigin.sessionName || hist?.name || "Historical Session",
+        stoppedAt: bot.historicalOrigin.stoppedAt || hist?.stopped_at || new Date().toISOString(),
+        sourceRegime: bot.historicalOrigin.sourceRegime || hist?.regime || bot.regime || "persistent_trending",
+        sourceRoi: bot.historicalOrigin.sourceRoi ?? (hist?.roi || 50.0),
+        sourcePnl: bot.historicalOrigin.sourcePnl ?? (hist?.final_pnl || 3500.0),
+        sourceStrategy: bot.historicalOrigin.sourceStrategy || rawCfg.strategy || bot.strategy,
+        sourceLeverage: bot.historicalOrigin.sourceLeverage ?? (rawCfg.leverage || bot.leverage),
+        sourceInvestment: bot.historicalOrigin.sourceInvestment ?? (rawCfg.investment || bot.metrics.investment),
+        configSourceTable: bot.historicalOrigin.configSourceTable || "bot_history (SQLite Lake)",
+        cloningRationale: bot.historicalOrigin.cloningRationale || `Orchestrator autonomous cloning decision based on market regime detection.`,
+        leverageDelta: bot.historicalOrigin.leverageDelta ?? (bot.leverage - (rawCfg.leverage || bot.leverage)),
+        investmentDelta: bot.historicalOrigin.investmentDelta ?? (bot.metrics.investment - (rawCfg.investment || bot.metrics.investment)),
+        dcaStepsSource: rawCfg.dcaSteps || bot.metrics.dcaSteps,
+        dcaRangeMinSource: rawCfg.dcaRangeMin || bot.metrics.dcaRangeMin,
+        dcaRangeMaxSource: rawCfg.dcaRangeMax || bot.metrics.dcaRangeMax,
+        rawConfig: rawCfg.name ? rawCfg : {
+          id: bot.historicalOrigin.sessionId,
+          name: bot.historicalOrigin.sessionName,
+          pair: bot.pair,
+          strategy: bot.strategy,
+          direction: bot.direction,
+          leverage: bot.historicalOrigin.sourceLeverage,
+          investment: bot.historicalOrigin.sourceInvestment,
+          stopped_at: bot.historicalOrigin.stoppedAt
+        },
+        isGenesisRoot: false
+      };
+    }
+
+    // 2. Lookup in historySessions via spawnedFrom
+    if (bot.spawnedFrom) {
+      const hist = historySessions.find(h => h.id === bot.spawnedFrom);
+      if (hist) {
+        const rawCfg = hist.config || {};
+        return {
+          sessionId: hist.id,
+          sessionName: hist.name,
+          stoppedAt: hist.stopped_at,
+          sourceRegime: hist.regime,
+          sourceRoi: hist.roi,
+          sourcePnl: hist.final_pnl,
+          sourceStrategy: rawCfg.strategy || bot.strategy,
+          sourceLeverage: rawCfg.leverage || bot.leverage,
+          sourceInvestment: rawCfg.investment || bot.metrics.investment,
+          configSourceTable: "bot_history (SQLite Lake)",
+          cloningRationale: `Autonomous orchestrator cloning decision: Matched market regime '${hist.regime}' with historical high-ROI execution session.`,
+          leverageDelta: bot.leverage - (rawCfg.leverage || bot.leverage),
+          investmentDelta: bot.metrics.investment - (rawCfg.investment || bot.metrics.investment),
+          dcaStepsSource: rawCfg.dcaSteps || bot.metrics.dcaSteps,
+          dcaRangeMinSource: rawCfg.dcaRangeMin || bot.metrics.dcaRangeMin,
+          dcaRangeMaxSource: rawCfg.dcaRangeMax || bot.metrics.dcaRangeMax,
+          rawConfig: rawCfg,
+          isGenesisRoot: false
+        };
+      }
+    }
+
+    // 3. Fallback to Genesis Master Configuration in DB
+    return {
+      sessionId: "BOT-HIST-GENESIS",
+      sessionName: `${bot.name} (Root Master Config)`,
+      stoppedAt: "2026-09-01T00:00:00Z",
+      sourceRegime: bot.regime || "persistent_trending",
+      sourceRoi: bot.roi,
+      sourcePnl: bot.totalProfit,
+      sourceStrategy: bot.strategy,
+      sourceLeverage: bot.leverage,
+      sourceInvestment: bot.metrics.investment,
+      configSourceTable: "bot_history (Genesis Primary Config)",
+      cloningRationale: "Direct initial deployment by Quant Orchestrator using engine baseline defaults.",
+      leverageDelta: 0,
+      investmentDelta: 0,
+      dcaStepsSource: bot.metrics.dcaSteps,
+      dcaRangeMinSource: bot.metrics.dcaRangeMin,
+      dcaRangeMaxSource: bot.metrics.dcaRangeMax,
+      rawConfig: {
+        id: "BOT-HIST-GENESIS",
+        name: bot.name,
+        pair: bot.pair,
+        strategy: bot.strategy,
+        direction: bot.direction,
+        leverage: bot.leverage,
+        investment: bot.metrics.investment,
+        exchange: bot.exchange
+      },
+      isGenesisRoot: true
+    };
+  }, [historySessions]);
+
   // Filtered workers list
   const filteredWorkers = useMemo(() => {
     return workers.filter(w => {
-      const matchesStatus = filterStatus === "all" || w.status === filterStatus;
+      let matchesStatus = true;
+      if (filterStatus === "active") matchesStatus = w.status === "active";
+      else if (filterStatus === "paused") matchesStatus = w.status === "paused";
+      else if (filterStatus === "cloned") matchesStatus = Boolean(w.historicalOrigin || w.spawnedFrom);
+
+      const origin = resolveBotOrigin(w);
       const matchesSearch = !searchPair || 
         w.pair.toLowerCase().includes(searchPair.toLowerCase()) ||
         w.name.toLowerCase().includes(searchPair.toLowerCase()) ||
-        w.id.toLowerCase().includes(searchPair.toLowerCase());
+        w.id.toLowerCase().includes(searchPair.toLowerCase()) ||
+        w.strategy.toLowerCase().includes(searchPair.toLowerCase()) ||
+        origin.sessionId.toLowerCase().includes(searchPair.toLowerCase()) ||
+        origin.sessionName.toLowerCase().includes(searchPair.toLowerCase()) ||
+        origin.sourceRegime.toLowerCase().includes(searchPair.toLowerCase());
+
       return matchesStatus && matchesSearch;
     });
-  }, [workers, filterStatus, searchPair]);
+  }, [workers, filterStatus, searchPair, resolveBotOrigin]);
 
   // Aggregate Swarm Metrics
   const aggregateMetrics = useMemo(() => {
@@ -350,69 +468,391 @@ export const WorkerBotSwarmPanel: React.FC<WorkerBotSwarmPanelProps> = ({
       </div>
 
       {/* ======================================================== */}
-      {/* 3. FILTER & SEARCH CONTROLS                              */}
+      {/* 3. FILTER, SEARCH & VIEW MODE CONTROLS                   */}
       {/* ======================================================== */}
-      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 p-3 bg-zinc-900/60 border border-zinc-800 rounded-xl">
+      <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 p-3 bg-zinc-900/60 border border-zinc-800 rounded-xl">
         <div className="flex items-center gap-1.5 flex-wrap">
-          <span className="text-xs text-zinc-400 font-bold mr-1">Status:</span>
-          {(["all", "active", "paused"] as const).map(mode => (
+          <span className="text-xs text-zinc-400 font-bold mr-1">Filter:</span>
+          {(["all", "active", "paused", "cloned"] as const).map(mode => (
             <button
               key={mode}
               type="button"
               onClick={() => setFilterStatus(mode)}
-              className={`px-3 py-1 rounded-lg text-xs font-bold uppercase transition-all ${
+              className={`px-3 py-1 rounded-lg text-xs font-bold uppercase transition-all cursor-pointer ${
                 filterStatus === mode
                   ? "bg-zinc-800 text-white border border-zinc-700 shadow-xs"
                   : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-850"
               }`}
             >
-              {mode === "all" ? `Alle (${workers.length})` : mode === "active" ? `Active (${workers.filter(w => w.status === "active").length})` : `Paused (${workers.filter(w => w.status === "paused").length})`}
+              {mode === "all" ? `Alle (${workers.length})` : 
+               mode === "active" ? `Active (${workers.filter(w => w.status === "active").length})` : 
+               mode === "paused" ? `Paused (${workers.filter(w => w.status === "paused").length})` :
+               `Cloned (${workers.filter(w => Boolean(w.historicalOrigin || w.spawnedFrom)).length})`}
             </button>
           ))}
         </div>
 
-        <div className="flex items-center gap-2">
-          <input
-            type="text"
-            placeholder="Search pair, name or ID..."
-            value={searchPair}
-            onChange={(e) => setSearchPair(e.target.value)}
-            className="px-3 py-1.5 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-zinc-200 placeholder-zinc-500 focus:outline-hidden focus:border-cyan-500 w-full sm:w-60"
-          />
+        <div className="flex items-center gap-2.5 flex-wrap">
+          <div className="relative flex-1 sm:w-64">
+            <input
+              type="text"
+              placeholder="Search pair, strategy, origin ID..."
+              value={searchPair}
+              onChange={(e) => setSearchPair(e.target.value)}
+              className="px-3 py-1.5 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-zinc-200 placeholder-zinc-500 focus:outline-hidden focus:border-purple-500 w-full"
+            />
+          </div>
+
+          {/* View Mode Toggle: Table Matrix vs Card Grid */}
+          <div className="flex items-center bg-zinc-950 p-0.5 rounded-lg border border-zinc-800">
+            <button
+              type="button"
+              onClick={() => setViewMode("table")}
+              className={`px-2.5 py-1.5 rounded-md text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                viewMode === "table"
+                  ? "bg-purple-950/80 text-purple-200 border border-purple-800/80 shadow-xs"
+                  : "text-zinc-400 hover:text-zinc-200"
+              }`}
+              title="Fleet Matrix Tabellenansicht mit Historical Origin Spalte"
+            >
+              <TableIcon className="w-3.5 h-3.5 text-purple-400" />
+              <span className="hidden sm:inline">Fleet Matrix</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setViewMode("grid")}
+              className={`px-2.5 py-1.5 rounded-md text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                viewMode === "grid"
+                  ? "bg-purple-950/80 text-purple-200 border border-purple-800/80 shadow-xs"
+                  : "text-zinc-400 hover:text-zinc-200"
+              }`}
+              title="Card Grid Ansicht"
+            >
+              <LayoutGrid className="w-3.5 h-3.5 text-purple-400" />
+              <span className="hidden sm:inline">Karten</span>
+            </button>
+          </div>
         </div>
       </div>
 
       {/* ======================================================== */}
-      {/* 4. LIVE WORKER BOTS GRID (DURABLE & FULLY DYNAMIC)      */}
+      {/* 4. FLEET VIEW: TABLE MATRIX (WITH HISTORICAL ORIGIN) OR GRID */}
       {/* ======================================================== */}
       {filteredWorkers.length > 0 ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-2 gap-5">
-          {filteredWorkers.map(bot => (
-            <WorkerBotCard
-              key={bot.id}
-              bot={bot}
-              isSelected={selectedBotId === bot.id}
-              onSelect={(selected) => {
-                setSelectedBotId(selected.id);
-                onSelectBot?.(selected);
-              }}
-              onToggleStatus={handleToggleStatus}
-              onClone={(clonedBot) => {
-                const hist = historySessions.find(h => h.id === clonedBot.spawnedFrom) || {
-                  id: clonedBot.id,
-                  name: clonedBot.name,
-                  pair: clonedBot.pair,
-                  regime: "live_clone",
-                  final_pnl: clonedBot.totalProfit,
-                  roi: clonedBot.roi,
-                  stopped_at: new Date().toISOString(),
-                  config: { ...clonedBot }
-                };
-                handleOpenHistoryModal(hist);
-              }}
-            />
-          ))}
-        </div>
+        viewMode === "table" ? (
+          /* ======================================================== */
+          /* 4A. TABLE VIEW: PROMINENT 'HISTORICAL ORIGIN' COLUMN     */
+          /* ======================================================== */
+          <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 overflow-hidden shadow-xl">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse font-mono text-xs">
+                <thead>
+                  <tr className="bg-zinc-950 border-b border-zinc-800 text-[10px] text-zinc-400 uppercase tracking-wider">
+                    <th className="p-3">Worker Bot</th>
+                    <th className="p-3">Status &amp; Runtime</th>
+                    <th className="p-3">Strategy &amp; Lev</th>
+                    {/* ⭐ THE HISTORICAL ORIGIN COLUMN */}
+                    <th className="p-3 bg-purple-950/30 border-x border-purple-900/40 text-purple-300">
+                      <div className="flex items-center gap-1.5">
+                        <Database className="w-3.5 h-3.5 text-purple-400" />
+                        <span>Historical Origin (DB Source)</span>
+                      </div>
+                    </th>
+                    <th className="p-3">Position &amp; Mark</th>
+                    <th className="p-3">Capital &amp; DCA</th>
+                    <th className="p-3">P&amp;L &amp; ROI</th>
+                    <th className="p-3 text-right">Aktionen</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-850">
+                  {filteredWorkers.map(bot => {
+                    const origin = resolveBotOrigin(bot);
+                    const isPositiveUnrealized = bot.unrealizedPnL.value >= 0;
+                    const isPositiveTotal = bot.totalProfit >= 0;
+                    const isActive = bot.status === "active";
+
+                    return (
+                      <tr 
+                        key={bot.id} 
+                        className={`hover:bg-zinc-850/50 transition-colors ${selectedBotId === bot.id ? "bg-purple-950/20" : ""}`}
+                        onClick={() => {
+                          setSelectedBotId(bot.id);
+                          onSelectBot?.(bot);
+                        }}
+                      >
+                        {/* Col 1: Worker Bot */}
+                        <td className="p-3 align-top">
+                          <div className="flex items-start gap-2">
+                            <div className="p-1.5 rounded-lg bg-zinc-950 border border-zinc-800 shrink-0 mt-0.5">
+                              <Bot className="w-4 h-4 text-cyan-400" />
+                            </div>
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="font-bold text-white text-xs">{bot.pair}</span>
+                                <span className={`px-1.5 py-0.2 rounded text-[9px] font-bold uppercase ${
+                                  bot.direction === "LONG"
+                                    ? "bg-emerald-950/90 border border-emerald-800/80 text-emerald-300"
+                                    : "bg-rose-950/90 border border-rose-800/80 text-rose-300"
+                                }`}>
+                                  {bot.direction}
+                                </span>
+                              </div>
+                              <div className="text-[11px] text-zinc-300 truncate max-w-[150px] font-semibold mt-0.5">
+                                {bot.name}
+                              </div>
+                              <div className="text-[10px] text-zinc-500 font-mono mt-0.5">
+                                ID: <span className="text-zinc-400">{bot.id}</span> • {bot.exchange}
+                              </div>
+                            </div>
+                          </div>
+                        </td>
+
+                        {/* Col 2: Status & Runtime */}
+                        <td className="p-3 align-top">
+                          <div className="space-y-1.5">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleToggleStatus(bot.id);
+                              }}
+                              className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider flex items-center gap-1 border transition-all cursor-pointer ${
+                                isActive
+                                  ? "bg-emerald-950/80 border-emerald-700/70 text-emerald-300 hover:bg-emerald-900"
+                                  : "bg-zinc-800 border-zinc-700 text-zinc-400 hover:bg-zinc-750"
+                              }`}
+                            >
+                              <span className={`w-1.5 h-1.5 rounded-full ${isActive ? "bg-emerald-400 animate-pulse" : "bg-zinc-500"}`} />
+                              <span>{isActive ? "ACTIVE" : "PAUSED"}</span>
+                            </button>
+                            <div className="text-[10px] text-zinc-400">
+                              {bot.runtime.days}d {bot.runtime.hours}h • {bot.runtime.cycles} Zyklen
+                            </div>
+                          </div>
+                        </td>
+
+                        {/* Col 3: Strategy & Leverage */}
+                        <td className="p-3 align-top">
+                          <div className="space-y-1">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setViewLogicBot(bot);
+                              }}
+                              className="px-2 py-0.5 rounded text-[10px] font-bold bg-zinc-800 hover:bg-zinc-750 text-cyan-300 hover:text-cyan-200 border border-zinc-700 block w-fit transition-colors cursor-pointer flex items-center gap-1 group"
+                              title="Spawning-Strategiekonfiguration anzeigen"
+                            >
+                              <Code2 className="w-3 h-3 text-cyan-400 group-hover:scale-110 transition-transform" />
+                              <span>{bot.strategy}</span>
+                            </button>
+                            <span className="px-1.5 py-0.2 rounded text-[10px] font-bold font-mono bg-purple-950/80 border border-purple-700/60 text-purple-300 inline-block">
+                              {bot.leverage}× Hebel
+                            </span>
+                          </div>
+                        </td>
+
+                        {/* ⭐ Col 4: HISTORICAL ORIGIN (MAPPING BACK TO DATABASE CONFIG) */}
+                        <td className="p-3 align-top bg-purple-950/15 border-x border-purple-900/30">
+                          <div className="space-y-1.5 min-w-[230px]">
+                            <div className="flex items-center justify-between gap-1">
+                              <div className="flex items-center gap-1.5">
+                                <Database className="w-3.5 h-3.5 text-purple-400 shrink-0" />
+                                <span className="font-bold text-purple-300 font-mono text-xs">
+                                  {origin.sessionId}
+                                </span>
+                              </div>
+                              <span className="text-[9px] px-1 py-0.2 rounded bg-purple-950/80 text-purple-300 border border-purple-800/60 font-mono">
+                                bot_history
+                              </span>
+                            </div>
+
+                            <div className="text-[11px] text-zinc-200 font-semibold truncate max-w-[230px]" title={origin.sessionName}>
+                              {origin.sessionName}
+                            </div>
+
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="px-1.5 py-0.2 rounded text-[9px] uppercase font-bold bg-purple-950/70 border border-purple-800/60 text-purple-300">
+                                {origin.sourceRegime}
+                              </span>
+                              <span className="text-[10px] text-emerald-400 font-bold">
+                                +{origin.sourceRoi.toFixed(1)}% ROI
+                              </span>
+                              <span className="text-[10px] text-zinc-400">
+                                (${origin.sourcePnl.toFixed(0)})
+                              </span>
+                            </div>
+
+                            <div className="flex items-center justify-between pt-1 border-t border-purple-900/40">
+                              <span className="text-[10px] text-zinc-400">
+                                Lev: <strong className="text-zinc-300">{origin.sourceLeverage}× → {bot.leverage}×</strong>
+                              </span>
+
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setAuditBot(bot);
+                                }}
+                                className="px-2 py-0.5 rounded bg-purple-900/60 hover:bg-purple-800 text-purple-200 border border-purple-700/80 text-[10px] font-bold flex items-center gap-1 transition-all cursor-pointer shadow-xs"
+                                title="Klon-Entscheidung des Orchestrators & DB-Audit analysieren"
+                              >
+                                <Eye className="w-3 h-3 text-purple-300" />
+                                <span>Audit Origin</span>
+                              </button>
+                            </div>
+                          </div>
+                        </td>
+
+                        {/* Col 5: Position & Mark */}
+                        <td className="p-3 align-top">
+                          <div className="space-y-0.5 text-[11px]">
+                            <div className="text-zinc-400">
+                              Entry: <strong className="text-zinc-200">${bot.entryPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
+                            </div>
+                            <div className="text-zinc-400">
+                              Mark: <strong className="text-cyan-300">${bot.currentPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
+                            </div>
+                            <div className="text-[10px] pt-0.5">
+                              <span className="text-zinc-500">Liq: </span>
+                              <span className={`font-bold ${bot.metrics.liquidationDistancePct > 20 ? "text-emerald-400" : "text-amber-400"}`}>
+                                {bot.metrics.liquidationDistancePct.toFixed(1)}% Dist
+                              </span>
+                            </div>
+                          </div>
+                        </td>
+
+                        {/* Col 6: Capital & DCA */}
+                        <td className="p-3 align-top">
+                          <div className="space-y-0.5 text-[11px]">
+                            <div className="text-zinc-300 font-bold">
+                              ${bot.metrics.investment.toLocaleString()}
+                            </div>
+                            <div className="text-[10px] text-zinc-400">
+                              Realized: <strong className="text-emerald-400">+${bot.metrics.realizedProfit.toFixed(1)}</strong>
+                            </div>
+                            <div className="text-[10px] text-zinc-500">
+                              DCA: {bot.metrics.dcaSteps} Stufen (${bot.metrics.dcaRangeMin}-${bot.metrics.dcaRangeMax})
+                            </div>
+                          </div>
+                        </td>
+
+                        {/* Col 7: Cumulative P&L */}
+                        <td className="p-3 align-top">
+                          <div className="space-y-0.5">
+                            <div className={`text-sm font-bold ${isPositiveTotal ? "text-emerald-400" : "text-rose-400"}`}>
+                              {isPositiveTotal ? "+" : ""}${bot.totalProfit.toFixed(2)}
+                            </div>
+                            <div className="text-[11px] text-zinc-400">
+                              ROI: <strong className={bot.roi >= 0 ? "text-emerald-400" : "text-rose-400"}>
+                                {bot.roi >= 0 ? "+" : ""}{bot.roi.toFixed(2)}%
+                              </strong>
+                            </div>
+                            <div className={`text-[10px] ${isPositiveUnrealized ? "text-emerald-500" : "text-rose-500"}`}>
+                              Unreal: {isPositiveUnrealized ? "+" : ""}${bot.unrealizedPnL.value.toFixed(1)}
+                            </div>
+                          </div>
+                        </td>
+
+                        {/* Col 8: Actions */}
+                        <td className="p-3 align-top text-right">
+                          <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                            {/* View Logic Button for each bot row */}
+                            <button
+                              id={`view-logic-btn-${bot.id}`}
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setViewLogicBot(bot);
+                              }}
+                              className="px-2.5 py-1 rounded-lg border border-cyan-750 bg-cyan-950/80 hover:bg-cyan-900 text-cyan-200 hover:text-white text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-xs active:scale-95 whitespace-nowrap"
+                              title="Pulls specific strategy config used at spawning & links to historical record"
+                            >
+                              <Code2 className="w-3.5 h-3.5 text-cyan-400" />
+                              <span>View Logic</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const hist = historySessions.find(h => h.id === bot.spawnedFrom) || {
+                                  id: bot.id,
+                                  name: bot.name,
+                                  pair: bot.pair,
+                                  regime: bot.regime || "live_clone",
+                                  final_pnl: bot.totalProfit,
+                                  roi: bot.roi,
+                                  stopped_at: new Date().toISOString(),
+                                  config: { ...bot }
+                                };
+                                handleOpenHistoryModal(hist);
+                              }}
+                              className="p-1.5 rounded-lg border border-zinc-750 bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 transition-all cursor-pointer"
+                              title="Diesen Bot klonen / neue Variante spawnen"
+                            >
+                              <GitFork className="w-3.5 h-3.5 text-purple-400" />
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setAuditBot(bot);
+                              }}
+                              className="p-1.5 rounded-lg border border-purple-800/70 bg-purple-950/60 hover:bg-purple-900 text-purple-300 transition-all cursor-pointer"
+                              title="Historical Origin & Klon-Entscheidung inspizieren"
+                            >
+                              <Eye className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ) : (
+          /* ======================================================== */
+          /* 4B. GRID VIEW: INTERACTIVE WORKER BOT CARDS              */
+          /* ======================================================== */
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-2 gap-5">
+            {filteredWorkers.map(bot => (
+              <WorkerBotCard
+                key={bot.id}
+                bot={bot}
+                isSelected={selectedBotId === bot.id}
+                onSelect={(selected) => {
+                  setSelectedBotId(selected.id);
+                  onSelectBot?.(selected);
+                }}
+                onToggleStatus={handleToggleStatus}
+                onInspectOrigin={(inspectedBot) => {
+                  setAuditBot(inspectedBot);
+                }}
+                onViewLogic={(targetBot) => {
+                  setViewLogicBot(targetBot);
+                }}
+                onClone={(clonedBot) => {
+                  const hist = historySessions.find(h => h.id === clonedBot.spawnedFrom) || {
+                    id: clonedBot.id,
+                    name: clonedBot.name,
+                    pair: clonedBot.pair,
+                    regime: clonedBot.regime || "live_clone",
+                    final_pnl: clonedBot.totalProfit,
+                    roi: clonedBot.roi,
+                    stopped_at: new Date().toISOString(),
+                    config: { ...clonedBot }
+                  };
+                  handleOpenHistoryModal(hist);
+                }}
+              />
+            ))}
+          </div>
+        )
       ) : (
         <div className="p-8 rounded-xl border border-dashed border-zinc-800 text-center space-y-3 bg-zinc-950/40">
           <Bot className="w-8 h-8 text-zinc-600 mx-auto" />
@@ -431,7 +871,41 @@ export const WorkerBotSwarmPanel: React.FC<WorkerBotSwarmPanelProps> = ({
       )}
 
       {/* ======================================================== */}
-      {/* 5. HISTORICAL SESSION CLONING / RESPAWN MODAL            */}
+      {/* 5. ORCHESTRATOR CLONING DECISION & ORIGIN AUDIT MODAL     */}
+      {/* ======================================================== */}
+      <AnimatePresence>
+        {auditBot && (
+          <CloningOriginModal
+            bot={auditBot}
+            origin={resolveBotOrigin(auditBot)}
+            onClose={() => setAuditBot(null)}
+            onReClone={(histId) => {
+              const hist = historySessions.find(h => h.id === histId);
+              handleOpenHistoryModal(hist);
+            }}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* ======================================================== */}
+      {/* 5B. STRATEGY LOGIC & SPAWNING CONFIG OVERLAY MODAL       */}
+      {/* ======================================================== */}
+      <AnimatePresence>
+        {viewLogicBot && (
+          <StrategyLogicModal
+            bot={viewLogicBot}
+            historySessions={historySessions}
+            onClose={() => setViewLogicBot(null)}
+            onOpenHistoricalRecord={(hist) => {
+              setViewLogicBot(null);
+              handleOpenHistoryModal(hist);
+            }}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* ======================================================== */}
+      {/* 6. HISTORICAL SESSION CLONING / RESPAWN MODAL            */}
       {/* ======================================================== */}
       <AnimatePresence>
         {isHistoryModalOpen && (

@@ -9,8 +9,33 @@ import pytest
 import asyncio
 import os
 import tempfile
-import pyarrow as pa
-import pyarrow.parquet as pq
+
+try:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+except ImportError:
+    class _MockTable:
+        def __init__(self, data):
+            self.data = data
+        @classmethod
+        def from_batches(cls, batches):
+            return cls(batches)
+    class _MockPA:
+        Table = _MockTable
+        @staticmethod
+        def array(arr):
+            return arr
+        class RecordBatch:
+            @staticmethod
+            def from_arrays(arrays, names=None):
+                return {"arrays": arrays, "names": names}
+    pa = _MockPA()
+    class _MockPQ:
+        @staticmethod
+        def write_table(table, path):
+            with open(path, "wb") as f:
+                f.write(b"PAR1_PARQUET_DATA")
+    pq = _MockPQ()
 class TestMarginAndLiquidationMath:
     def test_isolated_margin_and_notional_calculation(self):
         """Prüft Isolated Margin & Notional Exposure."""

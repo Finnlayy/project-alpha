@@ -59,45 +59,45 @@ export const mockTickers: MarketTicker[] = [
   {
     pair: "BTC/USD",
     symbol: "BTC/USD",
-    price: 64280.50,
-    lastPrice: 64280.50,
-    change24h: 2.84,
-    high: 65120.00,
-    low: 63200.00,
-    volume: 14280.45,
+    price: 77160.10,
+    lastPrice: 77160.10,
+    change24h: 3.42,
+    high: 77800.00,
+    low: 75400.00,
+    volume: 18240.50,
     timestamp: new Date().toISOString()
   },
   {
     pair: "ETH/USD",
     symbol: "ETH/USD",
-    price: 3450.25,
-    lastPrice: 3450.25,
-    change24h: 1.45,
-    high: 3510.00,
-    low: 3390.00,
-    volume: 85400.12,
+    price: 2513.15,
+    lastPrice: 2513.15,
+    change24h: 2.10,
+    high: 2560.00,
+    low: 2470.00,
+    volume: 64200.80,
     timestamp: new Date().toISOString()
   },
   {
     pair: "SOL/USD",
     symbol: "SOL/USD",
-    price: 152.80,
-    lastPrice: 152.80,
-    change24h: -0.92,
-    high: 156.40,
-    low: 149.50,
-    volume: 320140.80,
+    price: 102.31,
+    lastPrice: 102.31,
+    change24h: -1.25,
+    high: 106.80,
+    low: 99.40,
+    volume: 245100.20,
     timestamp: new Date().toISOString()
   },
   {
     pair: "XRP/USD",
     symbol: "XRP/USD",
-    price: 0.5842,
-    lastPrice: 0.5842,
-    change24h: 4.15,
-    high: 0.6010,
-    low: 0.5620,
-    volume: 984500.00,
+    price: 1.3540,
+    lastPrice: 1.3540,
+    change24h: 4.85,
+    high: 1.4200,
+    low: 1.2850,
+    volume: 852000.00,
     timestamp: new Date().toISOString()
   }
 ];
@@ -826,6 +826,33 @@ export const mockHistoricalBots: import("../types/trading").HistoricalBotSession
       entryPrice: 148.5,
       currentPrice: 144.8
     }
+  },
+  {
+    id: "BOT-HIST-6620",
+    name: "Gamma Volatility Arbitrageur (Beta Epoch)",
+    pair: "AVAX/USD.P",
+    regime: "low_volatility_spread",
+    final_pnl: 826.10,
+    roi: 33.04,
+    stopped_at: "2026-09-05T14:20:00Z",
+    config: {
+      name: "Gamma Volatility Arbitrageur",
+      exchange: "Kraken Futures",
+      pair: "AVAX/USD.P",
+      strategy: "VOLATILITY SPREAD",
+      direction: "LONG",
+      leverage: 3,
+      investment: 2500.0,
+      currency: "USD",
+      dcaRangeMin: 24.0,
+      dcaRangeMax: 32.0,
+      dcaSteps: 8,
+      liquidationPrice: 19.20,
+      liquidationDistancePct: 31.3,
+      apr: 86.1,
+      entryPrice: 28.50,
+      currentPrice: 27.95
+    }
   }
 ];
 
@@ -839,23 +866,41 @@ export const mockWorkerBots: import("../types/trading").WorkerBotData[] = [
     strategy: "M8 KELLY DCA",
     direction: "LONG",
     leverage: 5,
-    unrealizedPnL: {
-      value: 1420.50,
-      percentage: 14.21
+    spawnedFrom: "BOT-HIST-7742",
+    spawnedAt: "2026-09-09T08:15:00Z",
+    regime: "persistent_trending",
+    historicalOrigin: {
+      sessionId: "BOT-HIST-7742",
+      sessionName: "Alpha-Momentum Worker (Genesis Run)",
+      stoppedAt: "2026-09-08T18:30:00Z",
+      sourceRegime: "persistent_trending",
+      sourceRoi: 60.01,
+      sourcePnl: 6000.70,
+      sourceStrategy: "M8 KELLY DCA",
+      sourceLeverage: 5,
+      sourceInvestment: 10000.00,
+      configSourceTable: "bot_history (SQLite/Parquet Lake)",
+      cloningRationale: "DFA Hurst 0.68 Trend Confirmation: Cloned high-conviction momentum run with identical 5x Kelly sizing.",
+      leverageDelta: 0,
+      investmentDelta: 0
     },
-    entryPrice: 62840.00,
-    currentPrice: 64280.50,
+    unrealizedPnL: {
+      value: 1166.50,
+      percentage: 11.67
+    },
+    entryPrice: 75400.00,
+    currentPrice: 77160.10,
     metrics: {
       investment: 10000.00,
       currency: "USD",
       realizedProfit: 4580.20,
-      dcaRangeMin: 60500.00,
-      dcaRangeMax: 65200.00,
+      dcaRangeMin: 72000.00,
+      dcaRangeMax: 78500.00,
       dcaSteps: 6,
       dcaOrdersTriggered: 3,
       fundingFees: -42.80,
-      liquidationPrice: 51800.00,
-      liquidationDistancePct: 19.4
+      liquidationPrice: 61800.00,
+      liquidationDistancePct: 19.9
     },
     runtime: {
       days: 18,
@@ -863,8 +908,8 @@ export const mockWorkerBots: import("../types/trading").WorkerBotData[] = [
       minutes: 32,
       cycles: 142
     },
-    totalProfit: 6000.70,
-    roi: 60.01,
+    totalProfit: 5746.70,
+    roi: 57.47,
     apr: 121.8,
     lastUpdate: new Date()
   },
@@ -877,23 +922,41 @@ export const mockWorkerBots: import("../types/trading").WorkerBotData[] = [
     strategy: "DFA HURST BAND",
     direction: "LONG",
     leverage: 2,
-    unrealizedPnL: {
-      value: 385.75,
-      percentage: 6.43
+    spawnedFrom: "BOT-HIST-8819",
+    spawnedAt: "2026-09-08T10:45:00Z",
+    regime: "mean_reverting",
+    historicalOrigin: {
+      sessionId: "BOT-HIST-8819",
+      sessionName: "Sigma Mean-Reversion Bot (Alpha Epoch)",
+      stoppedAt: "2026-09-07T12:15:00Z",
+      sourceRegime: "mean_reverting",
+      sourceRoi: 42.94,
+      sourcePnl: 2576.25,
+      sourceStrategy: "DFA HURST BAND",
+      sourceLeverage: 2,
+      sourceInvestment: 6000.00,
+      configSourceTable: "bot_history (SQLite/Parquet Lake)",
+      cloningRationale: "Hurst exponent < 0.42 mean-reverting band detected: Cloned Spot isolation config to minimize liquidation exposure.",
+      leverageDelta: 0,
+      investmentDelta: 0
     },
-    entryPrice: 3380.00,
-    currentPrice: 3450.25,
+    unrealizedPnL: {
+      value: 259.27,
+      percentage: 4.32
+    },
+    entryPrice: 2460.00,
+    currentPrice: 2513.15,
     metrics: {
       investment: 6000.00,
       currency: "USD",
       realizedProfit: 2190.50,
-      dcaRangeMin: 3200.00,
-      dcaRangeMax: 3650.00,
+      dcaRangeMin: 2350.00,
+      dcaRangeMax: 2650.00,
       dcaSteps: 5,
       dcaOrdersTriggered: 2,
       fundingFees: 0.00,
-      liquidationPrice: 1750.00,
-      liquidationDistancePct: 49.3
+      liquidationPrice: 1250.00,
+      liquidationDistancePct: 50.2
     },
     runtime: {
       days: 26,
@@ -901,8 +964,8 @@ export const mockWorkerBots: import("../types/trading").WorkerBotData[] = [
       minutes: 19,
       cycles: 308
     },
-    totalProfit: 2576.25,
-    roi: 42.94,
+    totalProfit: 2449.77,
+    roi: 40.83,
     apr: 60.3,
     lastUpdate: new Date()
   },
@@ -915,23 +978,41 @@ export const mockWorkerBots: import("../types/trading").WorkerBotData[] = [
     strategy: "CADENCE BANDPASS",
     direction: "SHORT",
     leverage: 4,
-    unrealizedPnL: {
-      value: 295.40,
-      percentage: 8.44
+    spawnedFrom: "BOT-HIST-9901",
+    spawnedAt: "2026-09-07T14:30:00Z",
+    regime: "high_volatility",
+    historicalOrigin: {
+      sessionId: "BOT-HIST-9901",
+      sessionName: "Delta Cadence Scalper (High Vola Cycle)",
+      stoppedAt: "2026-09-06T22:45:00Z",
+      sourceRegime: "high_volatility",
+      sourceRoi: 61.01,
+      sourcePnl: 2135.40,
+      sourceStrategy: "CADENCE BANDPASS",
+      sourceLeverage: 4,
+      sourceInvestment: 3500.00,
+      configSourceTable: "bot_history (SQLite/Parquet Lake)",
+      cloningRationale: "Vol-Spike detected on SOL perpetual: Re-deployed micro-scalp cadence engine with 4x isolated leverage.",
+      leverageDelta: 0,
+      investmentDelta: 0
     },
-    entryPrice: 148.50,
-    currentPrice: 144.80,
+    unrealizedPnL: {
+      value: 293.45,
+      percentage: 8.38
+    },
+    entryPrice: 104.50,
+    currentPrice: 102.31,
     metrics: {
       investment: 3500.00,
       currency: "USD",
       realizedProfit: 1840.00,
-      dcaRangeMin: 140.00,
-      dcaRangeMax: 156.00,
+      dcaRangeMin: 96.00,
+      dcaRangeMax: 108.00,
       dcaSteps: 4,
       dcaOrdersTriggered: 1,
       fundingFees: 18.50,
-      liquidationPrice: 182.20,
-      liquidationDistancePct: 25.8
+      liquidationPrice: 126.50,
+      liquidationDistancePct: 23.6
     },
     runtime: {
       days: 9,
@@ -939,8 +1020,8 @@ export const mockWorkerBots: import("../types/trading").WorkerBotData[] = [
       minutes: 45,
       cycles: 94
     },
-    totalProfit: 2135.40,
-    roi: 61.01,
+    totalProfit: 2133.45,
+    roi: 60.96,
     apr: 247.4,
     lastUpdate: new Date()
   },
@@ -953,12 +1034,30 @@ export const mockWorkerBots: import("../types/trading").WorkerBotData[] = [
     strategy: "VOLATILITY SPREAD",
     direction: "LONG",
     leverage: 3,
-    unrealizedPnL: {
-      value: -64.20,
-      percentage: -2.57
+    spawnedFrom: "BOT-HIST-6620",
+    spawnedAt: "2026-09-06T09:00:00Z",
+    regime: "low_volatility_spread",
+    historicalOrigin: {
+      sessionId: "BOT-HIST-6620",
+      sessionName: "Gamma Volatility Arbitrageur (Beta Epoch)",
+      stoppedAt: "2026-09-05T14:20:00Z",
+      sourceRegime: "low_volatility_spread",
+      sourceRoi: 33.04,
+      sourcePnl: 826.10,
+      sourceStrategy: "VOLATILITY SPREAD",
+      sourceLeverage: 3,
+      sourceInvestment: 2500.00,
+      configSourceTable: "bot_history (SQLite/Parquet Lake)",
+      cloningRationale: "Range consolidation regime: Grid spread bot cloned from Beta historical archive to capture micro-swings.",
+      leverageDelta: 0,
+      investmentDelta: 0
     },
-    entryPrice: 28.50,
-    currentPrice: 27.95,
+    unrealizedPnL: {
+      value: -65.36,
+      percentage: -2.61
+    },
+    entryPrice: 7.65,
+    currentPrice: 7.45,
     metrics: {
       investment: 2500.00,
       currency: "USD",

@@ -234,6 +234,21 @@ class QuantOrchestrator:
             "name": f"{old_config.get('name', 'Cloned Bot')} [Spawned]",
             "status": "active",
             "spawnedFrom": historical_bot_id,
+            "spawnedAt": now_iso,
+            "regime": historical.get("regime", "adaptive"),
+            "historicalOrigin": {
+                "sessionId": historical_bot_id,
+                "sessionName": historical.get("name", "Historical Origin"),
+                "stoppedAt": historical.get("stopped_at", now_iso),
+                "sourceRegime": historical.get("regime", "unknown"),
+                "sourceRoi": historical.get("roi", 0.0),
+                "sourcePnl": historical.get("final_pnl", 0.0),
+                "sourceStrategy": old_config.get("strategy", "M8 KELLY DCA"),
+                "sourceLeverage": old_config.get("leverage", 1),
+                "sourceInvestment": initial_invest,
+                "configSourceTable": "bot_history (SQLite/Parquet Lake)",
+                "cloningRationale": f"Orchestrator autonomous cloning decision based on {historical.get('regime')} match."
+            },
             "start_time": now_iso,
             "lastUpdate": now_iso,
             "unrealizedPnL": {

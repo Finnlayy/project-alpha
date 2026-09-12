@@ -146,3 +146,32 @@ class M8StateEngine:
             state.budget_multiplier = 1.0
 
         return state.to_dict()
+
+    async def update_eod_profit_factor(
+        self,
+        instance_id: str,
+        daily_pf: Optional[float],
+        daily_trades_count: int
+    ) -> StrategyState:
+        """
+        Aktualisiert den End-of-Day Profit Factor Zähler.
+        Tage ohne Trades oder mit daily_pf=None erhöhen den Zähler nicht.
+        Fällt der Profit Factor an 3 aufeinanderfolgenden Tagen unter 1.0,
+        wird die Instanz gedrosselt (THROTTLED, 50% Budget).
+        """
+        state = self.states.get(instance_id)
+        if not state:
+            raise ValueError(f"Instanz '{instance_id}' nicht registriert.")
+
+        if daily_trades_count == 0 or daily_pf is None:
+            return state
+
+        if daily_pf < 1.0:
+            state.consecutive_low_pf_days += 1
+            if state.consecutive_low_pf_days >= 3:
+                state.status = "THROTTLED"
+                state.budget_multiplier = 0.5
+        else:
+            state.consecutive_low_pf_days = 0
+
+        return state
