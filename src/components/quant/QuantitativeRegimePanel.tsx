@@ -13,7 +13,9 @@ export function QuantitativeRegimePanel() {
   const [ampelData, setAmpelData] = useState<any>(null);
   const [crossImpactData, setCrossImpactData] = useState<any>(null);
   const [sentimentResult, setSentimentResult] = useState<any>(null);
-  const [customHeadline, setCustomHeadline] = useState<string>("SEC approves landmark multi-crypto ETF basket with instant spot settlement");
+  // NOTE: the sentiment score is computed from REAL funding/momentum data on the
+  // backend; a headline field is accepted for UI compatibility but not scored.
+  const [customHeadline, setCustomHeadline] = useState<string>("");
   const [isLoadingDFA, setIsLoadingDFA] = useState<boolean>(false);
   const [isLoadingAmpel, setIsLoadingAmpel] = useState<boolean>(false);
   const [isLoadingSentiment, setIsLoadingSentiment] = useState<boolean>(false);
@@ -83,19 +85,11 @@ export function QuantitativeRegimePanel() {
     }
   };
 
-  // Mock fluctuation curve points for DFA chart if not returned from backend
-  const dfaPlotPoints = dfaData?.fluctuation_curve || [
-    { scale: 8, fluctuation: 0.0012, fit: 0.0011 },
-    { scale: 16, fluctuation: 0.0019, fit: 0.0018 },
-    { scale: 32, fluctuation: 0.0029, fit: 0.0030 },
-    { scale: 64, fluctuation: 0.0048, fit: 0.0049 },
-    { scale: 128, fluctuation: 0.0079, fit: 0.0080 },
-    { scale: 256, fluctuation: 0.0131, fit: 0.0130 },
-    { scale: 512, fluctuation: 0.0212, fit: 0.0210 }
-  ];
-
-  const hurstExponent = dfaData?.hurst_exponent !== undefined ? dfaData.hurst_exponent : 0.62;
-  const hurstRegime = dfaData?.regime || (hurstExponent > 0.55 ? "TRENDING" : hurstExponent < 0.45 ? "MEAN_REVERTING" : "RANDOM_WALK");
+  // Real DFA fluctuation curve from the backend; empty when the feed has no data
+  const dfaPlotPoints: { scale: number; fluctuation: number; fit?: number }[] = dfaData?.fluctuation_curve || [];
+  const hurstExponent: number | null =
+    dfaData?.hurst_exponent !== undefined ? dfaData.hurst_exponent : dfaData?.hurstExponent ?? null;
+  const hurstRegime: string | null = dfaData?.regime || (hurstExponent !== null ? (hurstExponent > 0.55 ? "TRENDING" : hurstExponent < 0.45 ? "MEAN_REVERTING" : "RANDOM_WALK") : null);
 
   return (
     <div className="space-y-6" id="quant-regime-panel">
@@ -154,9 +148,11 @@ export function QuantitativeRegimePanel() {
                   ? "bg-emerald-950/80 text-emerald-300 border border-emerald-500/40"
                   : hurstRegime === "MEAN_REVERTING"
                   ? "bg-purple-950/80 text-purple-300 border border-purple-500/40"
-                  : "bg-blue-950/80 text-blue-300 border border-blue-500/40"
+                  : hurstRegime
+                  ? "bg-blue-950/80 text-blue-300 border border-blue-500/40"
+                  : "bg-slate-900 text-slate-500 border border-slate-700"
               }`}>
-                {hurstRegime}
+                {hurstRegime || "OFFLINE — NO DATA"}
               </span>
             </div>
 
@@ -165,24 +161,31 @@ export function QuantitativeRegimePanel() {
               <div>
                 <span className="text-[10px] uppercase tracking-wider text-slate-400 font-medium">Hurst (H)</span>
                 <p className="text-xl font-bold font-mono text-cyan-300 mt-0.5">
-                  {typeof hurstExponent === "number" ? hurstExponent.toFixed(4) : "0.6200"}
+                  {typeof hurstExponent === "number" ? hurstExponent.toFixed(4) : "—"}
                 </p>
               </div>
               <div>
                 <span className="text-[10px] uppercase tracking-wider text-slate-400 font-medium">Persistence</span>
                 <p className="text-xs font-bold text-slate-200 mt-1">
-                  {hurstExponent > 0.55 ? "Strong Trend Follow" : hurstExponent < 0.45 ? "High Mean Reversion" : "Geometric Brown."}
+                  {typeof hurstExponent === "number"
+                    ? hurstExponent > 0.55 ? "Strong Trend Follow" : hurstExponent < 0.45 ? "High Mean Reversion" : "Geometric Brown."
+                    : "Awaiting market data"}
                 </p>
               </div>
               <div>
                 <span className="text-[10px] uppercase tracking-wider text-slate-400 font-medium">Confidence (R²)</span>
                 <p className="text-sm font-mono text-emerald-400 mt-0.5">
-                  {dfaData?.r_squared ? `${(dfaData.r_squared * 100).toFixed(1)}%` : "98.4%"}
+                  {typeof dfaData?.r_squared === "number" ? `${(dfaData.r_squared * 100).toFixed(1)}%` : "—"}
                 </p>
               </div>
             </div>
 
             {/* DFA Log-Log Fluctuation Curve */}
+            {dfaPlotPoints.length === 0 ? (
+              <div className="h-44 w-full flex items-center justify-center text-xs text-slate-500 border border-dashed border-slate-800 rounded">
+                No DFA curve — insufficient real candles (Kraken feed offline or lake empty)
+              </div>
+            ) : (
             <div className="h-44 w-full">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={dfaPlotPoints} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
@@ -198,6 +201,7 @@ export function QuantitativeRegimePanel() {
                 </LineChart>
               </ResponsiveContainer>
             </div>
+            )}
           </div>
 
           <div className="mt-4 pt-3 border-t border-slate-800 text-[11px] text-slate-400 flex justify-between">
@@ -310,37 +314,17 @@ export function QuantitativeRegimePanel() {
             {/* Interactive Headline Tester */}
             <div className="space-y-3 mb-4">
               <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={customHeadline}
-                  onChange={(e) => setCustomHeadline(e.target.value)}
-                  placeholder="Enter crypto news headline or regulatory announcement..."
-                  className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-amber-500"
-                />
+                <div className="flex-1 bg-slate-950/60 border border-slate-800 rounded-lg px-3 py-2 text-[11px] text-slate-400">
+                  Score is computed from REAL market data: futures funding rates (contrarian), 24h momentum and spread pressure.
+                  No news/NLP model is deployed — the backend withholds the score when the feed is offline.
+                </div>
                 <button
                   onClick={() => fetchSentiment(customHeadline)}
                   disabled={isLoadingSentiment}
                   className="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-50"
                 >
-                  SCORE
+                  RE-SCORE
                 </button>
-              </div>
-
-              {/* Quick Presets */}
-              <div className="flex flex-wrap gap-1.5">
-                {[
-                  "SEC approves landmark multi-crypto ETF basket with instant settlement",
-                  "Major exchange halts withdrawals amid critical liquidity deficit rumors",
-                  "Federal Reserve signals rate cuts and dovish monetary policy easing"
-                ].map((sample, idx) => (
-                  <button
-                    key={idx}
-                    onClick={() => { setCustomHeadline(sample); fetchSentiment(sample); }}
-                    className="text-[10px] px-2 py-1 bg-slate-800/80 hover:bg-slate-700 text-slate-400 hover:text-slate-200 rounded truncate max-w-xs transition-colors"
-                  >
-                    {sample}
-                  </button>
-                ))}
               </div>
             </div>
 
@@ -350,21 +334,24 @@ export function QuantitativeRegimePanel() {
                 <div>
                   <span className="text-[10px] text-slate-400 uppercase">Polarity Score</span>
                   <p className={`text-xl font-bold font-mono mt-0.5 ${
-                    (sentimentResult.sentiment_score || 0) > 0.2 ? "text-emerald-400" : (sentimentResult.sentiment_score || 0) < -0.2 ? "text-red-400" : "text-slate-300"
+                    typeof sentimentResult.sentiment_score !== "number" ? "text-slate-500"
+                    : sentimentResult.sentiment_score > 0.2 ? "text-emerald-400" : sentimentResult.sentiment_score < -0.2 ? "text-red-400" : "text-slate-300"
                   }`}>
-                    {(sentimentResult.sentiment_score || 0) > 0 ? `+${(sentimentResult.sentiment_score || 0).toFixed(3)}` : (sentimentResult.sentiment_score || 0).toFixed(3)}
+                    {typeof sentimentResult.sentiment_score === "number"
+                      ? (sentimentResult.sentiment_score > 0 ? `+${sentimentResult.sentiment_score.toFixed(3)}` : sentimentResult.sentiment_score.toFixed(3))
+                      : "UNAVAILABLE"}
                   </p>
                 </div>
                 <div>
                   <span className="text-[10px] text-slate-400 uppercase">Confidence</span>
                   <p className="text-xl font-bold font-mono text-cyan-400 mt-0.5">
-                    {((sentimentResult.confidence || 0.92) * 100).toFixed(1)}%
+                    {typeof sentimentResult.confidence === "number" ? `${(sentimentResult.confidence * 100).toFixed(1)}%` : "—"}
                   </p>
                 </div>
                 <div>
                   <span className="text-[10px] text-slate-400 uppercase">Action Bias</span>
                   <p className="text-xs font-bold text-slate-200 mt-1 uppercase">
-                    {sentimentResult.label || ((sentimentResult.sentiment_score || 0) > 0.2 ? "BULLISH_SURGE" : (sentimentResult.sentiment_score || 0) < -0.2 ? "BEARISH_DUMP" : "NEUTRAL")}
+                    {sentimentResult.label || "UNAVAILABLE"}
                   </p>
                 </div>
               </div>

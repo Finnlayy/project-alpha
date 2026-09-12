@@ -48,89 +48,44 @@ export function FuturesPnLHealthMetric({
     fetchLedgers();
   }, []);
 
-  // Compute live or fallback metrics
+  // Derive metrics exclusively from REAL sources:
+  //   1. SSE telemetry (live engine) when present
+  //   2. /api/kraken/ledgers (live Kraken API) when credentials exist
+  //   3. explicit zero / "unconfigured" otherwise — never fabricated numbers
   const proLedger = ledgers?.pro;
   const spotLedger = ledgers?.spot;
+  const futuresConfigured = ledgers?.hasFuturesCredentials === true;
+  const spotConfigured = ledgers?.hasSpotCredentials === true;
 
-  // Real-time telemetry overrides if streaming from SSE
-  const totalUnrealizedPnL = telemetryFuturesRisk?.total_unrealized_pnl_usd ?? (proLedger?.totalUnrealizedPnL ?? 345.50);
-  const unrealizedPnLPercent = telemetryFuturesRisk?.unrealized_pnl_percent ?? (proLedger?.unrealizedPnLPercent ?? 2.24);
-  const totalCollateralUSD = telemetryFuturesRisk?.total_collateral_usd ?? (proLedger?.totalCollateralUSD ?? 50000.00);
-  const freeMarginUSD = telemetryFuturesRisk?.free_margin_usd ?? (proLedger?.freeMarginUSD ?? 38500.00);
-  const usedMarginUSD = telemetryFuturesRisk?.used_margin_usd ?? (proLedger?.usedMarginUSD ?? 11500.00);
-  const marginLevelPercent = telemetryFuturesRisk?.margin_level_percent ?? (proLedger?.marginLevelPercent ?? 434.78);
-  const effectiveLeverage = telemetryFuturesRisk?.effective_leverage ?? (proLedger?.effectiveLeverage ?? 1.85);
-  const nearestLiqDistance = telemetryFuturesRisk?.nearest_liquidation_distance_percent ?? 25.02;
-  const positions: KrakenProPosition[] = proLedger?.positions ?? [
-    {
-      id: "pos-btc-01",
-      pair: "BTC/USD",
-      type: "long",
-      contractType: "perpetual",
-      size: 0.5,
-      notionalValueUSD: 32140.25,
-      leverage: 3,
-      entryPrice: 63800.00,
-      markPrice: 64280.50,
-      liquidationPrice: 48200.00,
-      collateralUSD: 10713.41,
-      marginRequirementUSD: 10713.41,
-      unrealizedPnLUSD: 240.25,
-      unrealizedPnLPercent: 2.24,
-      fundingRate: 0.000105,
-      status: "open"
-    },
-    {
-      id: "pos-eth-02",
-      pair: "ETH/USD",
-      type: "short",
-      contractType: "perpetual",
-      size: 4.0,
-      notionalValueUSD: 13801.00,
-      leverage: 2,
-      entryPrice: 3480.00,
-      markPrice: 3450.25,
-      liquidationPrice: 4950.00,
-      collateralUSD: 6900.50,
-      marginRequirementUSD: 6900.50,
-      unrealizedPnLUSD: 119.00,
-      unrealizedPnLPercent: 3.42,
-      fundingRate: -0.000080,
-      status: "open"
-    },
-    {
-      id: "pos-sol-03",
-      pair: "SOL/USD",
-      type: "long",
-      contractType: "perpetual",
-      size: 25.0,
-      notionalValueUSD: 3750.00,
-      leverage: 5,
-      entryPrice: 151.20,
-      markPrice: 150.65,
-      liquidationPrice: 122.50,
-      collateralUSD: 750.00,
-      marginRequirementUSD: 750.00,
-      unrealizedPnLUSD: -13.75,
-      unrealizedPnLPercent: -1.82,
-      fundingRate: 0.000120,
-      status: "open"
-    }
-  ];
+  const num = (v: unknown): number | null => (typeof v === "number" && isFinite(v) ? v : null);
 
-  // Spot comparison metrics
-  const spotTotalUSD = telemetrySpotVault?.total_value_usd ?? (spotLedger?.totalValueUSD ?? 88420.50);
-  const spotFreeCashUSD = telemetrySpotVault?.free_cash_usd ?? (spotLedger?.freeCashUSD ?? 42580.40);
-  const spotCryptoUSD = telemetrySpotVault?.crypto_value_usd ?? (spotLedger?.cryptoValueUSD ?? 45840.10);
-  const spotChange24hUSD = telemetrySpotVault?.change_24h_usd ?? (spotLedger?.change24hUSD ?? 1425.80);
-  const spotChange24hPercent = telemetrySpotVault?.change_24h_percent ?? (spotLedger?.change24hPercent ?? 1.64);
+  const positions: KrakenProPosition[] = futuresConfigured ? (proLedger?.positions ?? []) : [];
+
+  const totalUnrealizedPnL = num(telemetryFuturesRisk?.total_unrealized_pnl_usd) ?? positions.reduce((a, p) => a + (p.unrealizedPnLUSD || 0), 0);
+  const totalNotionalUSD = positions.reduce((acc, p) => acc + (p.notionalValueUSD || 0), 0);
+  const totalCollateralUSD = num(telemetryFuturesRisk?.total_collateral_usd) ?? positions.reduce((a, p) => a + (p.collateralUSD || 0), 0);
+  const usedMarginUSD = num(telemetryFuturesRisk?.used_margin_usd) ?? positions.reduce((a, p) => a + (p.marginRequirementUSD || 0), 0);
+  const freeMarginUSD = num(telemetryFuturesRisk?.free_margin_usd) ?? Math.max(0, totalCollateralUSD - usedMarginUSD);
+  const marginLevelPercent = num(telemetryFuturesRisk?.margin_level_percent) ?? (usedMarginUSD > 0 ? (totalCollateralUSD / usedMarginUSD) * 100 : 0);
+  const effectiveLeverage = num(telemetryFuturesRisk?.effective_leverage) ?? (totalCollateralUSD > 0 ? totalNotionalUSD / totalCollateralUSD : 0);
+  const unrealizedPnLPercent = num(telemetryFuturesRisk?.unrealized_pnl_percent) ?? (totalNotionalUSD > 0 ? (totalUnrealizedPnL / totalNotionalUSD) * 100 : 0);
+  const liqDistances = positions
+    .filter((p) => p.markPrice && p.liquidationPrice)
+    .map((p) => (Math.abs(p.markPrice - p.liquidationPrice) / p.markPrice) * 100);
+  const nearestLiqDistance = num(telemetryFuturesRisk?.nearest_liquidation_distance_percent) ?? (liqDistances.length ? Math.min(...liqDistances) : 0);
+
+  // Spot comparison metrics (real ledger values only)
+  const spotTotalUSD = num(telemetrySpotVault?.total_value_usd) ?? num(spotLedger?.totalValueUSD) ?? (spotConfigured ? 0 : 0);
+  const spotFreeCashUSD = num(telemetrySpotVault?.free_cash_usd) ?? num(spotLedger?.freeCashUSD) ?? 0;
+  const spotCryptoUSD = num(telemetrySpotVault?.crypto_value_usd) ?? num(spotLedger?.cryptoValueUSD) ?? 0;
+  const spotChange24hUSD = num(telemetrySpotVault?.change_24h_usd) ?? num(spotLedger?.change24hUSD) ?? 0;
+  const spotChange24hPercent = num(telemetrySpotVault?.change_24h_percent) ?? num(spotLedger?.change24hPercent) ?? 0;
 
   // Computed breakdowns
   const longPositions = positions.filter(p => p.type === 'long');
   const shortPositions = positions.filter(p => p.type === 'short');
   const longsUnrealizedPnL = longPositions.reduce((acc, p) => acc + p.unrealizedPnLUSD, 0);
   const shortsUnrealizedPnL = shortPositions.reduce((acc, p) => acc + p.unrealizedPnLUSD, 0);
-  const totalNotionalUSD = positions.reduce((acc, p) => acc + p.notionalValueUSD, 0);
 
   // Stress-test computations
   // For Futures: Longs lose (notional * shock), Shorts gain (notional * -shock)
@@ -179,9 +134,19 @@ export function FuturesPnLHealthMetric({
         <div className="flex items-center gap-2.5 self-start md:self-auto">
           {/* M8 Risk Gate status pill */}
           <div className="px-2.5 py-1 rounded bg-slate-900 border border-slate-700/80 flex items-center gap-1.5 text-[11px] font-mono">
-            <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-            <span className="text-slate-400">M8 Gate:</span>
-            <span className="text-emerald-300 font-bold">NORMAL (PASS)</span>
+            {futuresConfigured ? (
+              <>
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                <span className="text-slate-400">M8 Gate:</span>
+                <span className="text-emerald-300 font-bold">NORMAL (PASS)</span>
+              </>
+            ) : (
+              <>
+                <ShieldAlert className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                <span className="text-slate-400">M8 Gate:</span>
+                <span className="text-slate-400 font-bold">NO CREDENTIALS</span>
+              </>
+            )}
           </div>
 
           <button
@@ -258,13 +223,15 @@ export function FuturesPnLHealthMetric({
                 Futures Margin Level
               </span>
               <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold uppercase ${
-                marginLevelPercent >= 200 
+                !futuresConfigured
+                  ? 'bg-slate-950 text-slate-500 border border-slate-800/50'
+                  : marginLevelPercent >= 200 
                   ? 'bg-emerald-950 text-emerald-300 border border-emerald-800/50' 
                   : marginLevelPercent >= 130 
                   ? 'bg-amber-950 text-amber-300 border border-amber-800/50'
                   : 'bg-rose-950 text-rose-300 border border-rose-800/50'
               }`}>
-                {marginLevelPercent >= 200 ? 'SAFE (>200%)' : marginLevelPercent >= 130 ? 'CAUTION' : 'MARGIN CALL'}
+                {!futuresConfigured ? 'UNCONFIGURED' : marginLevelPercent >= 200 ? 'SAFE (>200%)' : marginLevelPercent >= 130 ? 'CAUTION' : 'MARGIN CALL'}
               </span>
             </div>
 
@@ -441,6 +408,15 @@ export function FuturesPnLHealthMetric({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/60 bg-slate-900/40">
+                    {positions.length === 0 && (
+                      <tr>
+                        <td colSpan={8} className="px-3.5 py-6 text-center text-slate-500">
+                          {futuresConfigured
+                            ? "No open perpetual positions (live from Kraken Pro API)"
+                            : "Kraken Futures (Pro) credentials not configured — no positions loaded, nothing simulated"}
+                        </td>
+                      </tr>
+                    )}
                     {positions.map((pos) => {
                       const posPositive = pos.unrealizedPnLUSD >= 0;
                       const liqDistancePercent = pos.type === 'long'
