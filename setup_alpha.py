@@ -485,18 +485,6 @@ from typing import Dict, Any
 logger = logging.getLogger("app.telegram.bot_engine")
 '''
 
-files["app/security/PasskeyAuthEngine.py"] = '''"""
-=========================================================
-Datei:      app/security/PasskeyAuthEngine.py (v1.6.0)
-Zweck:      Passkey (FIDO2 / WebAuthn) & Google OAuth2 Auth
-Knoten:     Jaune (Carrera-Engine)
-=========================================================
-"""
-import logging
-
-logger = logging.getLogger("app.security.passkey_engine")
-'''
-
 
 files["app/security/SettingsEnvManager.py"] = '''"""
 =========================================================
@@ -966,7 +954,19 @@ export class PasskeyWebAuthnClient {
 }
 '''
 
-assert len(files) == 23, f"Expected 23 files, got {len(files)}"
+assert len(files) == 22, f"Expected 23 files, got {len(files)}"
+
+# --- DEPRECATION GUARD (v2.0 rebuild) -------------------------------------
+# This script is the ORIGINAL v1.6.4 skeleton bootstrap. The repository now
+# contains the real execution system (FastAPI backend in app/, DuckDB lake,
+# real Kraken clients). Re-running the skeleton generator would overwrite
+# production code, so it is refused whenever the real backend is present.
+if os.path.exists(os.path.join(TARGET_BASE, "app", "main.py")):
+    print("✋ setup_alpha.py ist veraltet (v1.6.4-Scaffold).")
+    print("   Das Repository enthält bereits das echte Ausführungssystem (v2.0+).")
+    print("   Ausführen würde Produktionscode überschreiben — wurde abgebrochen.")
+    print("   Setup-Anleitung: README.md (Venv, .env, bin/run.sh oder docker-compose).")
+    raise SystemExit(1)
 
 print("\n📝 Schreiben aller Projektdateien auf dein lokales Laufwerk...")
 for rel_path, content in files.items():

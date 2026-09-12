@@ -1,0 +1,48 @@
+# =========================================================
+# Projekt:Alpha — local production stack
+#   backend  : FastAPI execution engine on :8000
+#   frontend : built React dashboard on :3000 (serves dist,
+#              proxies /api -> backend)
+#
+#   docker compose up --build
+#   # then open http://localhost:3000
+# =========================================================
+services:
+  backend:
+    build: .
+    image: alpha-backend:latest
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - ALPHA_DATA_DIR=/data
+    volumes:
+      - alpha-data:/data
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  frontend:
+    image: node:20-slim
+    working_dir: /srv/alpha
+    # vite preview serves the built SPA and proxies /api -> backend
+    command: sh -c "npm ci && npm run build && npx vite preview --host 0.0.0.0 --port 3000"
+    environment:
+      - VITE_API_PROXY=http://backend:8000
+    volumes:
+      - .:/srv/alpha:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  alpha-data:

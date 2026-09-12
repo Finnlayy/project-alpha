@@ -56,128 +56,6 @@ interface BacktestingPanelProps {
   symbols?: KrakenSymbolInfo[];
 }
 
-function generateSimulatedBacktest(
-  strat: TradingStrategy,
-  pair: string,
-  intervalMinutes: number,
-  candles: number,
-  initialBal: number,
-  feePct: number
-): BacktestResult {
-  const basePrice = pair.startsWith('BTC') ? 64000 : pair.startsWith('ETH') ? 3450 : pair.startsWith('SOL') ? 140 : 10;
-  const trades: BacktestTrade[] = [];
-  const equityCurve: BacktestEquityPoint[] = [];
-
-  let currentBal = initialBal;
-  let peakBal = initialBal;
-  let maxDD = 0;
-  let winning = 0;
-  let losing = 0;
-  let totalFees = 0;
-  let bestTrade = 0;
-  let worstTrade = 0;
-
-  const now = Date.now();
-  const tradeCount = Math.max(12, Math.floor(candles / 15));
-
-  for (let i = 0; i < tradeCount; i++) {
-    const isWin = Math.random() < 0.65;
-    const pnlPct = isWin ? +(1.2 + Math.random() * 4.5).toFixed(2) : -(0.8 + Math.random() * 2.2);
-    const pnl = +(currentBal * (pnlPct / 100)).toFixed(2);
-    const fee = +(currentBal * (feePct / 100)).toFixed(2);
-    totalFees += fee;
-    currentBal += pnl - fee;
-
-    if (currentBal > peakBal) peakBal = currentBal;
-    const currentDD = ((peakBal - currentBal) / Math.max(1, peakBal)) * 100;
-    if (currentDD > maxDD) maxDD = currentDD;
-
-    if (pnl > 0) {
-      winning++;
-      if (pnl > bestTrade) bestTrade = pnl;
-    } else {
-      losing++;
-      if (pnl < worstTrade) worstTrade = pnl;
-    }
-
-    const tradeTime = new Date(now - (tradeCount - i) * 60 * 60 * 1000).toISOString();
-    trades.push({
-      id: `trade-${i + 1}`,
-      type: Math.random() > 0.4 ? 'buy' : 'sell',
-      entryTime: tradeTime,
-      exitTime: new Date(now - (tradeCount - i - 0.5) * 60 * 60 * 1000).toISOString(),
-      entryPrice: +(basePrice * (1 + (Math.random() - 0.5) * 0.05)).toFixed(2),
-      exitPrice: +(basePrice * (1 + (Math.random() - 0.5) * 0.05)).toFixed(2),
-      amount: +(1000 / basePrice).toFixed(4),
-      totalValue: 1000,
-      fee,
-      pnl,
-      pnlPercent: +pnlPct.toFixed(2),
-      reason: isWin ? 'Take Profit ATR Imbalance' : 'Dynamic ATR Stop',
-      status: 'closed'
-    });
-  }
-
-  let runningBal = initialBal;
-  let runningPeak = initialBal;
-  for (let c = 0; c < 30; c++) {
-    const delta = (Math.random() - 0.45) * 80;
-    runningBal += delta;
-    if (runningBal > runningPeak) runningPeak = runningBal;
-    const dd = +(((runningPeak - runningBal) / Math.max(1, runningPeak)) * 100).toFixed(2);
-    const pointTime = new Date(now - (30 - c) * 2 * 60 * 60 * 1000).toISOString();
-    equityCurve.push({
-      timestamp: pointTime,
-      time: pointTime.slice(11, 16),
-      price: +(basePrice * (1 + (c / 30) * 0.06)).toFixed(2),
-      equity: +runningBal.toFixed(2),
-      benchmarkEquity: +(initialBal * (1 + (c / 30) * 0.08)).toFixed(2),
-      drawdown: dd,
-      cash: +(runningBal * 0.2).toFixed(2),
-      assetHoldings: +(runningBal * 0.8).toFixed(2)
-    });
-  }
-
-  const totalReturn = +(currentBal - initialBal).toFixed(2);
-  const totalReturnPct = +((totalReturn / Math.max(1, initialBal)) * 100).toFixed(2);
-
-  return {
-    id: `bt-${Date.now()}`,
-    strategyId: strat?.id || 'strat-sim',
-    strategyName: strat?.name || 'Quantitative Strategy',
-    assetPair: pair,
-    interval: intervalMinutes,
-    periodLabel: `Last ${candles} Bars`,
-    startTime: new Date(now - candles * intervalMinutes * 60 * 1000).toISOString(),
-    endTime: new Date().toISOString(),
-    totalCandles: candles,
-    summary: {
-      initialBalance: initialBal,
-      finalBalance: +currentBal.toFixed(2),
-      totalReturnUSD: totalReturn,
-      totalReturnPercent: totalReturnPct,
-      benchmarkReturnPercent: 8.4,
-      alpha: +(totalReturnPct - 8.4).toFixed(2),
-      maxDrawdownUSD: +(initialBal * (maxDD / 100)).toFixed(2),
-      maxDrawdownPercent: +maxDD.toFixed(2),
-      sharpeRatio: 2.18,
-      sortinoRatio: 3.12,
-      winRate: +((winning / Math.max(1, trades.length)) * 100).toFixed(1),
-      totalTrades: trades.length,
-      winningTrades: winning,
-      losingTrades: losing,
-      profitFactor: 2.45,
-      averageTradeReturn: +(totalReturn / Math.max(1, trades.length)).toFixed(2),
-      bestTradeUSD: +bestTrade.toFixed(2),
-      worstTradeUSD: +worstTrade.toFixed(2),
-      avgHoldCandles: 8.4,
-      totalFeesPaid: +totalFees.toFixed(2)
-    },
-    equityCurve,
-    trades
-  };
-}
-
 export const BacktestingPanel: React.FC<BacktestingPanelProps> = ({
   strategies,
   selectedStrategy,
@@ -202,6 +80,7 @@ export const BacktestingPanel: React.FC<BacktestingPanelProps> = ({
   // Execution & Results State
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [backtestResult, setBacktestResult] = useState<BacktestResult | null>(null);
+  const [backtestError, setBacktestError] = useState<string | null>(null);
   const [activeChartTab, setActiveChartTab] = useState<'equity' | 'drawdown' | 'price'>('equity');
   const [tradeFilter, setTradeFilter] = useState<'all' | 'wins' | 'losses' | 'stops'>('all');
   
@@ -258,30 +137,13 @@ export const BacktestingPanel: React.FC<BacktestingPanelProps> = ({
       const data: any = await res.json();
       if (data && data.summary && Array.isArray(data.trades) && Array.isArray(data.equityCurve)) {
         setBacktestResult(data);
+        setBacktestError(null);
       } else {
-        const fallback = generateSimulatedBacktest(
-          currentStrategy,
-          assetPair,
-          interval,
-          candleCount,
-          initialBalance,
-          feePercent
-        );
-        setBacktestResult(fallback);
+        setBacktestError("Backend returned an incomplete backtest result (no trades/equity curve). No data is fabricated.");
       }
     } catch (err: any) {
       console.error("Backtest run failure:", err);
-      if (currentStrategy) {
-        const fallback = generateSimulatedBacktest(
-          currentStrategy,
-          assetPair,
-          interval,
-          candleCount,
-          initialBalance,
-          feePercent
-        );
-        setBacktestResult(fallback);
-      }
+      setBacktestError(`Backtest unavailable: ${err?.message || "backend unreachable"}. The engine requires real Kraken candles (feed offline or lake empty) — nothing is simulated.`);
     } finally {
       setIsLoading(false);
     }
@@ -592,7 +454,7 @@ export const BacktestingPanel: React.FC<BacktestingPanelProps> = ({
           </div>
 
           <div className="text-zinc-500 text-[10px]">
-            Targeting Kraken execution environment with accurate tick-level simulated fills
+            Targeting the real Kraken execution environment: next-bar-open fills, taker fees and slippage modeled explicitly
           </div>
         </div>
       </div>
@@ -606,7 +468,17 @@ export const BacktestingPanel: React.FC<BacktestingPanelProps> = ({
       )}
 
       {/* 2. RESULTS BODY */}
-      {!backtestResult ? (
+      {backtestError ? (
+        <div className="bg-red-950/40 border border-red-900/70 rounded-lg p-12 text-center space-y-4">
+          <div className="w-12 h-12 rounded-full bg-red-900/50 flex items-center justify-center mx-auto">
+            <AlertTriangle className="w-6 h-6 text-red-400" />
+          </div>
+          <div className="max-w-lg mx-auto space-y-1">
+            <h3 className="text-sm font-mono font-bold text-red-300">Backtest Unavailable</h3>
+            <p className="text-xs text-red-200/80 font-mono leading-relaxed">{backtestError}</p>
+          </div>
+        </div>
+      ) : !backtestResult ? (
         <div className="bg-zinc-900/60 border border-zinc-800/80 border-dashed rounded-lg p-12 text-center space-y-4">
           <div className="w-12 h-12 rounded-full bg-zinc-800/80 flex items-center justify-center mx-auto text-zinc-500">
             <Activity className="w-6 h-6 text-zinc-400" />

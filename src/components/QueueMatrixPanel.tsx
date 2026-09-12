@@ -140,7 +140,7 @@ export default function QueueMatrixPanel({
               </div>
               <p className="text-xs font-mono text-zinc-400 mt-0.5">
                 {isPaper 
-                  ? 'All-time simulation queue with direct real-time order-book fills & simulated ledger.' 
+                  ? 'Paper queue: deterministic fills at live marks with explicit fees; ledger persisted in the DuckDB data lake.' 
                   : 'All-time autonomous execution queue routing capital to Kraken Pro Exchange.'}
               </p>
             </div>

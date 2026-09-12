@@ -151,7 +151,7 @@ export default function CalendarHeatmap({
       const res = await fetch(`/api/pnl/daily/${targetEndpointId}?${queryParams}`);
       if (res.ok) {
         const json = await res.json();
-        if (json && Array.isArray(json.days) && json.days.length > 0 && typeof json.total30DPnL === 'number') {
+        if (json && Array.isArray(json.days) && json.days.length > 0 && (typeof json.total30DPnL === 'number' || typeof json.totalMonthPnL === 'number')) {
           setHeatmapData(json);
           const todayItem = json.days.find((d: DailyPnLDay) => d.isToday);
           const firstActive = json.days.find((d: DailyPnLDay) => d.tradesCount > 0 || d.pnl !== 0);
@@ -263,7 +263,9 @@ export default function CalendarHeatmap({
       ? "PAPER Q"
       : "PORTFOLIO";
 
-    const mockData: DailyPnLHeatmapData = {
+    // Zero-filled fallback for when the backend is unreachable: today carries the
+    // real aggregated PnL, all other days are honestly 0 (no fabricated history).
+    const fallbackData: DailyPnLHeatmapData = {
       strategyId: targetEndpointId,
       strategyName: displayName,
       assetPair: displayPair,
@@ -280,10 +282,10 @@ export default function CalendarHeatmap({
       worstDay,
       winRatePercent: activeDayCount > 0 ? Number(((greenDays / activeDayCount) * 100).toFixed(1)) : 0,
       avgDailyPnL: Number((total30DPnL / Math.max(1, activeDayCount || 1)).toFixed(2)),
-      profitFactor: todayPnL >= 0 ? 99.0 : 0.0
+      profitFactor: 0
     };
 
-    setHeatmapData(mockData);
+    setHeatmapData(fallbackData);
     if (days.length > 0) {
       const todayItem = days.find(d => d.isToday);
       setSelectedDay(todayItem || days[0]);
