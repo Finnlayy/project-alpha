@@ -23,13 +23,15 @@ logger = logging.getLogger("app.mcp.kraken_bridge")
 class KrakenMCPBridge:
     FUTURES_TOOLS = {
         "get_futures_positions", "get_perpetuals_ticker", "place_futures_order",
-        "cancel_futures_order", "get_futures_margin_health", "set_futures_leverage",
-        "get_liquidation_price", "get_funding_rates",
+        "cancel_futures_order", "get_futures_margin_health",
+        "get_liquidation_price", "get_funding_rates", "get_futures_open_orders",
+        "get_futures_fills", "close_futures_position",
     }
 
     SPOT_TOOLS = {
         "get_spot_ledger", "get_spot_ticker", "place_spot_order",
         "cancel_spot_order", "get_spot_open_orders", "get_server_time",
+        "get_spot_trade_balance",
     }
 
     def __init__(self, settings=None):
@@ -95,16 +97,20 @@ class KrakenMCPBridge:
             pair = args.get("pair", "BTC/USD")
             return self.spot.ticker([KrakenSpotClient.pair_to_native(pair)])
         if tool_name == "get_perpetuals_ticker":
-            pair = args.get("pair", "BTC/USD")
-            return self.futures.ticker(KrakenFuturesClient.symbol_to_contract(pair))
+            symbol = args.get("symbol") or KrakenFuturesClient.symbol_to_contract(args.get("pair", "BTC/USD"))
+            return self.futures.ticker(symbol)
         if tool_name == "get_funding_rates":
-            pair = args.get("pair", "BTC/USD")
-            return self.futures.funding_rates(KrakenFuturesClient.symbol_to_contract(pair))
+            symbol = args.get("symbol") or KrakenFuturesClient.symbol_to_contract(args.get("pair", "BTC/USD"))
+            return self.futures.funding_rates(symbol)
         # ---- private tools (credentials required) ----
         if tool_name == "get_spot_ledger":
             if not self.settings.spot.configured:
                 return None
             return self.spot.balance(args.get("asset"))
+        if tool_name == "get_spot_trade_balance":
+            if not self.settings.spot.configured:
+                return None
+            return self.spot.trade_balance(args.get("asset", "ZUSD"))
         if tool_name == "get_spot_open_orders":
             if not self.settings.spot.configured:
                 return None
@@ -117,6 +123,7 @@ class KrakenMCPBridge:
             return self.spot.add_order(
                 KrakenSpotClient.pair_to_native(pair), side, args.get("ordertype", "limit"),
                 float(args["volume"]), price=args.get("price"), oflags=args.get("oflags", "post"),
+                validate=bool(args.get("validate", False)),
             )
         if tool_name == "cancel_spot_order":
             if not self.settings.spot.configured:
@@ -125,21 +132,52 @@ class KrakenMCPBridge:
         if tool_name == "get_futures_positions":
             if not self.settings.futures.configured:
                 return None
-            return self.futures.positions()
+            return self.futures.open_positions()
+        if tool_name == "get_futures_open_orders":
+            if not self.settings.futures.configured:
+                return None
+            return self.futures.open_orders()
+        if tool_name == "get_futures_fills":
+            if not self.settings.futures.configured:
+                return None
+            return self.futures.fills()
+        if tool_name == "get_futures_margin_health":
+            if not self.settings.futures.configured:
+                return None
+            return self.futures.accounts()
+        if tool_name == "get_liquidation_price":
+            # The Futures v3 REST API publishes no per-position liquidation price.
+            # Return an explicitly-flagged isolated-margin estimate instead of failing.
+            from app.kraken.ledger_views import estimate_liquidation_price
+
+            entry = float(args["entry_price"])
+            lev = float(args.get("leverage", 1.0))
+            side = args.get("side", "long")
+            return {
+                "symbol": args.get("symbol") or KrakenFuturesClient.symbol_to_contract(args.get("pair", "BTC/USD")),
+                "liquidationPrice": estimate_liquidation_price(entry, lev, side),
+                "liquidationPriceEstimated": True,
+                "method": "isolated-margin formula (exchange publishes no liquidation price on v3 REST)",
+            }
         if tool_name == "place_futures_order":
             if not self.settings.futures.configured:
                 return None
-            pair = args["pair"]
-            return self.futures.place_order(
-                KrakenFuturesClient.symbol_to_contract(pair), args["side"], int(args["size"]),
-                order_type=args.get("order_type", "limit"), price=args.get("price"),
+            symbol = args.get("symbol") or KrakenFuturesClient.symbol_to_contract(args["pair"])
+            return self.futures.send_order(
+                symbol, args["side"], float(args["size"]),
+                order_type=args.get("order_type", "lmt"), limit_price=args.get("price"),
+                reduce_only=bool(args.get("reduce_only", False)),
+                cli_ord_id=args.get("cli_ord_id"),
             )
         if tool_name == "cancel_futures_order":
             if not self.settings.futures.configured:
                 return None
-            return self.futures.cancel_order(args["pair"], args["order_id"])
-        if tool_name == "set_futures_leverage":
+            return self.futures.cancel_order(
+                order_id=args.get("order_id"), symbol=args.get("symbol"), cli_ord_id=args.get("cli_ord_id")
+            )
+        if tool_name == "close_futures_position":
             if not self.settings.futures.configured:
                 return None
-            return self.futures.set_leverage(args["pair"], int(args["leverage"]))
+            symbol = args.get("symbol") or KrakenFuturesClient.symbol_to_contract(args["pair"])
+            return self.futures.close_position(symbol, size=args.get("size"))
         raise ValueError(f"unknown MCP tool '{tool_name}'")

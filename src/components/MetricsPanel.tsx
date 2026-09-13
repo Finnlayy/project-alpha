@@ -816,24 +816,29 @@ export default function MetricsPanel({
         {/* Tab 2: Pro / Futures Ledger View */}
         {walletTab === 'pro' && (
           <div className="space-y-2 max-h-52 overflow-y-auto pr-1 font-mono">
-            {/* Pro Margin Summary Bar */}
+            {/* Pro Margin Summary Bar (real /api/kraken/positions/pro data; zeros when unavailable — never faked) */}
             <div className="bg-zinc-950 p-2 rounded border border-zinc-800/80 text-[10px] space-y-1 mb-2">
+              {proData && proData.configured === false && (
+                <div className="text-amber-300/90 bg-amber-950/40 border border-amber-800/50 rounded px-1.5 py-1">
+                  Futures API not configured — live margin unavailable.
+                </div>
+              )}
               <div className="flex justify-between text-zinc-400">
                 <span>Total Collateral:</span>
                 <span className="text-purple-300 font-bold">
-                  ${(proData?.totalCollateralUSD || 25000).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  ${(Number(proData?.totalCollateralUSD) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </span>
               </div>
               <div className="flex justify-between text-zinc-400">
                 <span>Free Margin:</span>
                 <span className="text-emerald-400 font-bold">
-                  ${(proData?.freeMarginUSD || 21500).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  ${(Number(proData?.freeMarginUSD) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </span>
               </div>
               <div className="flex justify-between text-zinc-400">
                 <span>Total Unrealized P&amp;L:</span>
-                <span className={`font-bold ${(proData?.totalUnrealizedPnL || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                  {(proData?.totalUnrealizedPnL || 0) >= 0 ? '+' : ''}${(proData?.totalUnrealizedPnL || 0).toFixed(2)} USD
+                <span className={`font-bold ${(Number(proData?.totalUnrealizedPnL) || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  {(Number(proData?.totalUnrealizedPnL) || 0) >= 0 ? '+' : ''}${(Number(proData?.totalUnrealizedPnL) || 0).toFixed(2)} USD
                 </span>
               </div>
             </div>
@@ -841,22 +846,24 @@ export default function MetricsPanel({
             {/* Pro Active Positions List */}
             {proData?.positions && proData.positions.length > 0 ? (
               proData.positions.map((p: any) => {
-                const isPos = p.unrealizedPnLUSD >= 0;
+                const upl = Number(p.unrealizedPnLUSD) || 0;
+                const mark = Number(p.markPrice) || 0;
+                const isPos = upl >= 0;
                 return (
-                  <div key={p.id} className="p-2 rounded bg-zinc-950/60 border border-zinc-800 text-[11px] space-y-1">
+                  <div key={p.id || `${p.pair}-${p.type}`} className="p-2 rounded bg-zinc-950/60 border border-zinc-800 text-[11px] space-y-1">
                     <div className="flex justify-between items-center">
                       <div className="flex items-center space-x-1.5">
                         <span className={`w-1.5 h-1.5 rounded-full ${p.type === 'long' ? 'bg-emerald-400' : 'bg-rose-400'}`} />
                         <span className="font-bold text-white">{p.pair}</span>
-                        <span className="text-[9px] px-1 rounded bg-zinc-800 text-zinc-300">{p.leverage}x</span>
+                        <span className="text-[9px] px-1 rounded bg-zinc-800 text-zinc-300">{p.leverage ?? '—'}x</span>
                       </div>
                       <span className={`font-bold ${isPos ? 'text-emerald-400' : 'text-rose-400'}`}>
-                        {isPos ? '+' : ''}${p.unrealizedPnLUSD.toFixed(2)}
+                        {isPos ? '+' : ''}${upl.toFixed(2)}
                       </span>
                     </div>
                     <div className="flex justify-between text-[10px] text-zinc-400">
-                      <span>Size: {p.size} ({p.type.toUpperCase()})</span>
-                      <span>Mark: ${p.markPrice.toLocaleString()}</span>
+                      <span>Size: {p.size} ({String(p.type || '').toUpperCase()})</span>
+                      <span>Mark: ${mark.toLocaleString()}</span>
                     </div>
                   </div>
                 );

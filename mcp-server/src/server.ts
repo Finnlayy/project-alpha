@@ -9,6 +9,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { AlphaClient } from "./alphaClient.js";
 import { registerDashboardTools } from "./tools/dashboard.js";
 import { registerMarketTools } from "./tools/market.js";
+import { registerKrakenTools } from "./tools/kraken.js";
 import { registerTradingTools } from "./tools/trading.js";
 import { registerQuantTools } from "./tools/quant.js";
 import { registerBacktestTools } from "./tools/backtest.js";
@@ -23,9 +24,10 @@ export function createAlphaServer(): McpServer {
     version: "2.0.0",
   });
 
-  // Register all tool categories (35 tools)
+  // Register all tool categories (59 tools)
   registerDashboardTools(server, client);
   registerMarketTools(server, client);
+  registerKrakenTools(server, client);
   registerTradingTools(server, client);
   registerQuantTools(server, client);
   registerBacktestTools(server, client);

@@ -79,18 +79,33 @@ export default function KrakenLedgersPanel({
         if (data.spot && data.pro) {
           setLedgers({
             mode: isPaperTrading ? 'paper' : 'live',
-            hasCredentials,
+            hasCredentials: data.hasCredentials ?? hasCredentials,
+            hasSpotCredentials: data.hasSpotCredentials,
+            hasFuturesCredentials: data.hasFuturesCredentials,
             lastSync: data.timestamp,
             spot: data.spot,
             pro: data.pro
           });
-          setSyncNotice("Synced real-time balances from Kraken exchange.");
-          setTimeout(() => setSyncNotice(null), 4000);
+          if (data.success) {
+            setSyncNotice("Synced real-time balances from Kraken exchange.");
+          } else {
+            const missing = [
+              !data.hasSpotCredentials ? "Spot key" : null,
+              !data.hasFuturesCredentials ? "Futures key" : null,
+            ].filter(Boolean).join(" + ");
+            setSyncNotice(`No live balances — missing ${missing || "credentials"}. Showing last known state.`);
+          }
+          setTimeout(() => setSyncNotice(null), 5000);
         }
+      } else {
+        setSyncNotice(`Sync failed (HTTP ${res.status}). Backend unreachable or exchange error.`);
+        setTimeout(() => setSyncNotice(null), 5000);
       }
       if (onRefreshTrigger) onRefreshTrigger();
     } catch (err) {
       console.error("Sync error:", err);
+      setSyncNotice("Sync failed — backend unreachable.");
+      setTimeout(() => setSyncNotice(null), 5000);
     } finally {
       setIsSyncing(false);
     }

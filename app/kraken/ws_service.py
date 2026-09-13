@@ -1,11 +1,22 @@
 """
 Real Kraken WebSocket v2 public market data service.
 
-- Subscribes to `ticker` (real-time last prices) and `ohlc-v1` (candle updates)
-- Heartbeat ping every 5s, automatic reconnect with exponential backoff
-- Thread-safe in-memory cache: latest tickers, per-(pair,interval) confirmed candles
-- Exposes the same shape the UI expects; returns [] / 0 when the feed is down —
-  never synthetic data.
+Docs: https://docs.kraken.com/api/docs/websocket-v2/
+
+- Subscribes to `ticker` (L1 last/bid/ask, 24h change) and `ohlc` (candle
+  updates) using the v2 envelope:
+      {"method": "subscribe", "params": {"channel": "ticker", "symbol": ["BTC/USD"], "snapshot": true}}
+  NOTE: v2 symbols are canonical ("BTC/USD"), NOT native ("XBTUSD").
+- Incoming frames:
+      {"channel": "ticker", "type": "snapshot|update", "data": [{symbol, bid, ask, last, volume, vwap, low, high, change, change_pct}]}
+      {"channel": "ohlc", "type": "snapshot|update", "data": [{symbol, interval, open, high, low, close, volume, vwap, count, interval_begin}]}
+      {"channel": "heartbeat"}
+      {"method": "subscribe", "success": true, "result": {...}}   (ack)
+- Heartbeat ping every 8s (websocket-client run_forever), automatic reconnect
+  with exponential backoff.
+- Thread-safe in-memory cache: latest tickers, per-(symbol,interval) candles,
+  latest bar per (symbol,interval) for SSE fanout.
+- Returns [] / None when the feed is down — never synthetic data.
 """
 from __future__ import annotations
 
@@ -15,10 +26,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-import httpx
-
 from app.config import Settings
-from app.kraken.spot_client import KrakenSpotClient
 
 logger = logging.getLogger("app.kraken.ws")
 
@@ -37,12 +45,15 @@ class KrakenWebSocketService:
         self.last_message_time: Optional[float] = None
         self.started_at: Optional[float] = None
         self.reconnect_attempts = 0
+        self.last_subscribe_ack: Optional[Dict[str, Any]] = None
+        self.last_error: Optional[str] = None
 
-        # caches
-        self.tick_data: Dict[str, List[float]] = {}  # pair -> [c,o,h,l,v,vw,l,a,spread]
+        # caches (keyed by CANONICAL symbol, e.g. "BTC/USD")
+        self.tick_data: Dict[str, Dict[str, float]] = {}
         self.ticker_time: Dict[str, float] = {}
-        self.candles: Dict[str, List[List[float]]] = {}  # "PAIR|interval" -> rows [t,o,h,l,c,v,cnt]
-        self.last_rest_latency_ms: float = 0.0
+        self.candles: Dict[str, List[List[float]]] = {}  # "SYMBOL|interval" -> rows [t,o,h,l,c,v,count]
+        self.last_bars: Dict[str, Dict[str, Any]] = {}   # "SYMBOL|interval" -> latest bar dict
+        self._bar_seq = 0
 
     # ---------------------------------------------------------------- control
     def start(self) -> None:
@@ -64,8 +75,6 @@ class KrakenWebSocketService:
 
     # ------------------------------------------------------------------- loop
     def _run_loop(self) -> None:
-        import websocket  # websockets or websocket-client, loaded lazily
-
         backoff = 1.0
         while not self._stop.is_set():
             try:
@@ -73,6 +82,7 @@ class KrakenWebSocketService:
                 backoff = 1.0  # reset backoff on clean long session
             except Exception as exc:  # noqa: BLE001
                 logger.warning("WS loop error: %s", exc)
+                self.last_error = f"{type(exc).__name__}: {exc}"[:200]
             with self._lock:
                 self.connected = False
             if self._stop.is_set():
@@ -99,11 +109,17 @@ class KrakenWebSocketService:
         ws.run_forever(ping_interval=8, ping_timeout=5)
 
     def _on_open(self, ws) -> None:
-        pairs = [KrakenSpotClient.pair_to_native(s) for s in self.settings.tracked_symbols]
-        subs = [{"subscription": {"name": "ticker"}, "pair": pairs}]
-        for interval in (self.settings.default_interval,):
-            subs.append({"subscription": {"name": "ohlc-v1", "interval": str(interval)}, "pair": pairs})
-        ws.send(json.dumps({"method": "subscribe", "params": subs, "id": "alpha-sub-1"}))
+        # v2 wants canonical symbols ("BTC/USD")
+        symbols = list(self.settings.tracked_symbols)
+        interval = int(self.settings.default_interval)
+        ws.send(json.dumps({
+            "method": "subscribe",
+            "params": {"channel": "ticker", "symbol": symbols, "snapshot": True},
+        }))
+        ws.send(json.dumps({
+            "method": "subscribe",
+            "params": {"channel": "ohlc", "symbol": symbols, "interval": interval, "snapshot": True},
+        }))
         with self._lock:
             self.connected = True
             self.reconnect_attempts = 0
@@ -114,45 +130,122 @@ class KrakenWebSocketService:
             msg = json.loads(raw)
         except Exception:
             return
-        self.last_message_time = time.time()
-        mtype = msg.get("method")
-        if mtype in ("snapshot", "heartbeat"):
+        if not isinstance(msg, dict):
             return
-        if msg.get("channelType") == "data" and msg.get("subscription"):
-            self._handle_data(msg)
-        elif mtype in ("subscribe", "unsubscribe", "error"):
+        self.last_message_time = time.time()
+
+        # acknowledgements / errors for (un)subscribe
+        if "method" in msg:
+            method = msg.get("method")
+            if method in ("subscribe", "unsubscribe", "ping", "pong"):
+                if msg.get("success") is False:
+                    self.last_error = str(msg.get("error") or msg)[:200]
+                    self._emit("ws-message", msg)
+                else:
+                    with self._lock:
+                        self.last_subscribe_ack = msg
+                    self._emit("ws-message", msg)
+                return
+            self._emit("ws-message", msg)
+            return
+
+        channel = (msg.get("channel") or "").lower()
+        if channel == "heartbeat":
+            return
+        if channel == "status":
+            self._emit("status", msg)
+            return
+        if channel == "ticker":
+            self._handle_ticker(msg.get("data") or [])
+        elif channel == "ohlc":
+            self._handle_ohlc(msg.get("data") or [])
+        else:
             self._emit("ws-message", msg)
 
-    def _handle_data(self, msg: Dict[str, Any]) -> None:
-        sub = msg.get("subscription") or {}
-        name = (sub.get("name") or "").lower()
-        data = msg.get("data") or {}
+    def _handle_ticker(self, rows: List[Dict[str, Any]]) -> None:
         with self._lock:
-            if name == "ticker":
-                for pair, row in data.items():
-                    if isinstance(row, list) and len(row) >= 9:
-                        self.tick_data[pair] = [float(x) if x is not None else 0.0 for x in row]
-                        self.ticker_time[pair] = time.time()
-            elif name.startswith("ohlc"):
-                interval = sub.get("interval", str(self.settings.default_interval))
-                for pair, rows in data.items():
-                    if not isinstance(rows, dict):
+            for row in rows:
+                try:
+                    symbol = row.get("symbol")
+                    if not symbol:
                         continue
-                    for _iv, row_list in rows.items():
-                        key = f"{pair}|{_iv}"
-                        bucket = self.candles.setdefault(key, [])
-                        for row in row_list:
-                            if isinstance(row, list) and len(row) >= 6:
-                                if bucket and abs(float(row[0]) - float(bucket[-1][0])) < 1:
-                                    bucket[-1] = row
-                                else:
-                                    bucket.append(row)
-                        if len(bucket) > 2000:
-                            del bucket[: len(bucket) - 2000]
+                    last = float(row.get("last") or 0)
+                    if last <= 0:
+                        continue
+                    self.tick_data[symbol] = {
+                        "last": last,
+                        "bid": float(row.get("bid") or 0),
+                        "ask": float(row.get("ask") or 0),
+                        "high": float(row.get("high") or 0),
+                        "low": float(row.get("low") or 0),
+                        "volume": float(row.get("volume") or 0),
+                        "vwap": float(row.get("vwap") or 0),
+                        "change": float(row.get("change") or 0),
+                        "change_pct": float(row.get("change_pct") or 0),
+                    }
+                    self.ticker_time[symbol] = time.time()
+                except (TypeError, ValueError):
+                    continue
         self._emit("ticker", {"tickers": self.get_tickers()})
+
+    def _handle_ohlc(self, rows: List[Dict[str, Any]]) -> None:
+        bars: List[Dict[str, Any]] = []
+        with self._lock:
+            for row in rows:
+                try:
+                    symbol = row.get("symbol")
+                    interval = int(row.get("interval") or self.settings.default_interval)
+                    if not symbol:
+                        continue
+                    # v2 uses interval_begin (ISO); older frames used timestamp (sec)
+                    begin = row.get("interval_begin") or row.get("timestamp")
+                    if isinstance(begin, str):
+                        try:
+                            t = time.mktime(time.strptime(begin[:19], "%Y-%m-%dT%H:%M:%S"))
+                        except ValueError:
+                            t = time.time()
+                    else:
+                        t = float(begin or time.time())
+                    o = float(row.get("open") or 0)
+                    h = float(row.get("high") or 0)
+                    low = float(row.get("low") or 0)
+                    c = float(row.get("close") or 0)
+                    v = float(row.get("volume") or 0)
+                    if c <= 0:
+                        continue
+                    key = f"{symbol}|{interval}"
+                    bucket = self.candles.setdefault(key, [])
+                    frame = [t, o, h, low, c, v, float(row.get("count") or 0)]
+                    if bucket and abs(frame[0] - bucket[-1][0]) < 1:
+                        bucket[-1] = frame
+                    else:
+                        bucket.append(frame)
+                    if len(bucket) > 2000:
+                        del bucket[: len(bucket) - 2000]
+                    bar = {
+                        "symbol": symbol,
+                        "pair": symbol,
+                        "interval": interval,
+                        "time": int(t),
+                        "timestamp": int(t * 1000),
+                        "open": o,
+                        "high": h,
+                        "low": low,
+                        "close": c,
+                        "volume": v,
+                        "source": "ws.kraken.com/v2 (live)",
+                    }
+                    self.last_bars[key] = bar
+                    self._bar_seq += 1
+                    bars.append(bar)
+                except (TypeError, ValueError):
+                    continue
+        for bar in bars:
+            self._emit("ohlc_bar", {"type": "ohlc_bar", "bar": bar})
 
     def _on_error(self, ws, error) -> None:
         logger.debug("WS error: %s", error)
+        self.last_error = str(error)[:200]
 
     def _on_close(self, ws, *_args) -> None:
         with self._lock:
@@ -169,46 +262,47 @@ class KrakenWebSocketService:
     # ------------------------------------------------------------------ reads
     def get_tickers(self) -> List[Dict[str, Any]]:
         """Latest real tickers. [] when feed unavailable."""
-        spot = KrakenSpotClient(self.settings)
         out: List[Dict[str, Any]] = []
         with self._lock:
             for symbol in self.settings.tracked_symbols:
-                native = spot.pair_to_native(symbol)
-                row = self.tick_data.get(native)
+                row = self.tick_data.get(symbol)
                 if not row:
                     continue
-                last, open_, high, low, volume = row[0], row[1], row[2], row[3], row[4]
-                if open_ <= 0:
-                    continue
-                change24h = (last - open_) / open_ * 100.0  # 24h open from ticker frame
                 out.append(
                     {
                         "pair": symbol,
                         "symbol": symbol,
-                        "price": last,
-                        "lastPrice": last,
-                        "change24h": round(change24h, 4),
-                        "high": high,
-                        "low": low,
-                        "volume": volume,
-                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.ticker_time.get(native, time.time()))),
+                        "price": row["last"],
+                        "lastPrice": row["last"],
+                        "bid": row["bid"],
+                        "ask": row["ask"],
+                        "change24h": round(row["change_pct"], 4),
+                        "changeAbs": round(row["change"], 6),
+                        "high": row["high"],
+                        "low": row["low"],
+                        "volume": row["volume"],
+                        "vwap": row["vwap"] or None,
+                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.ticker_time.get(symbol, time.time()))),
                         "source": "ws.kraken.com/v2 (live)",
                     }
                 )
         return out
 
     def get_mark_price(self, symbol: str) -> Optional[float]:
-        native = KrakenSpotClient.pair_to_native(symbol)
         with self._lock:
-            row = self.tick_data.get(native)
-            return row[0] if row else None
+            row = self.tick_data.get(symbol)
+            return row["last"] if row else None
 
     def get_candles(self, symbol: str, interval: int) -> List[List[float]]:
         """Real confirmed candles from the WS feed (may be sparse right after start)."""
-        native = KrakenSpotClient.pair_to_native(symbol)
-        key = f"{native}|{interval}"
+        key = f"{symbol}|{interval}"
         with self._lock:
             return list(self.candles.get(key, []))
+
+    def get_last_bars(self) -> Dict[str, Dict[str, Any]]:
+        """Latest ohlc bar per 'SYMBOL|interval' (for SSE fanout)."""
+        with self._lock:
+            return dict(self.last_bars)
 
     def get_real_time_status(self) -> Dict[str, Any]:
         with self._lock:
@@ -218,4 +312,6 @@ class KrakenWebSocketService:
                 "secondsSinceMessage": (time.time() - self.last_message_time) if self.last_message_time else None,
                 "reconnectAttempts": self.reconnect_attempts,
                 "cachedTickers": len(self.tick_data),
+                "cachedBars": len(self.last_bars),
+                "lastError": self.last_error,
             }

@@ -49,17 +49,23 @@ class AppState:
         self.bus.emit("info", "Bootstrap", "backend ready")
 
     def candle_cache(self, symbol: str, interval_min: int, limit: int = 500) -> tuple[list, str]:
-        """(candles, source) — lake cache first, live REST refresh on top."""
+        """(candles, source) — lake cache first, live REST refresh on top.
+
+        Kraken OHLC envelope: {"error": [], "result": {<pair>: [[t,o,h,l,c,vwap,vol,count], ...], "last": ...}}.
+        Only result[<pair>] holds candles; the "last" key must be skipped.
+        """
         from app.kraken.spot_client import KrakenError, KrakenSpotClient
 
         spot = KrakenSpotClient(self.settings)
         try:
             payload = spot.ohlc(KrakenSpotClient.pair_to_native(symbol), interval_min)
-            if payload:
-                native = list(payload.keys())[0]
+            result = (payload or {}).get("result") or {}
+            natives = [k for k in result.keys() if k != "last"]
+            if natives:
+                native = natives[0]
                 rows = [
-                    {"time": int(r[0]), "open": float(r[1]), "high": float(r[2]), "low": float(r[3]), "close": float(r[4]), "volume": float(r[5]) if len(r) > 5 else 0.0}
-                    for r in payload[native]
+                    {"time": int(r[0]), "open": float(r[1]), "high": float(r[2]), "low": float(r[3]), "close": float(r[4]), "volume": float(r[6]) if len(r) > 6 else 0.0}
+                    for r in result[native]
                 ]
                 if rows:
                     self.lake.upsert_candles(symbol, interval_min, rows[-limit:])
