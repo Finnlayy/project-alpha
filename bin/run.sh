@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # =========================================================
-# Projekt:Alpha — local run (real backend + real frontend)
+# Projekt:Alpha — local run (real backend + real frontend + MCP server)
 #   backend : FastAPI on :8000 (uvicorn)
 #   frontend: Vite dev server on :3000 (proxies /api -> :8000)
+#   mcp     : MCP server on :4100 (Streamable HTTP transport)
 #
 # Usage:
-#   ./bin/run.sh            # starts both
+#   ./bin/run.sh            # starts backend + frontend
 #   ./bin/run.sh backend    # backend only
 #   ./bin/run.sh frontend   # frontend only
+#   ./bin/run.sh mcp        # MCP server only (HTTP on :4100)
 #
 # Credentials (optional, real values only — the system degrades
 # to paper/offline states explicitly when absent):
@@ -43,9 +45,21 @@ run_frontend() {
   npx vite --host 0.0.0.0 --port "${FRONTEND_PORT:-3000}"
 }
 
+run_mcp() {
+  cd mcp-server
+  if [ ! -d node_modules ]; then
+    echo "Installing MCP server dependencies ..."
+    npm install
+  fi
+  cd ..
+  echo "Starting MCP server on http://0.0.0.0:${MCP_PORT:-4100}/mcp"
+  cd mcp-server && MCP_PORT="${MCP_PORT:-4100}" ALPHA_BACKEND_URL="${ALPHA_BACKEND_URL:-http://127.0.0.1:8000}" npx tsx src/http-server.ts
+}
+
 case "${1:-all}" in
   backend)   run_backend ;;
   frontend)  run_frontend ;;
+  mcp)       run_mcp ;;
   all)
     run_backend &
     BACKEND_PID=$!
@@ -53,7 +67,7 @@ case "${1:-all}" in
     run_frontend
     ;;
   *)
-    echo "Usage: $0 [all|backend|frontend]"
+    echo "Usage: $0 [all|backend|frontend|mcp]"
     exit 2
     ;;
 esac
