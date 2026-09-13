@@ -29,6 +29,7 @@ real DuckDB data lake — with a single iron rule:
 | Sessions | `app/auth/session.py` — HMAC-SHA256 signed tokens, revocation, TTL | round-trip/expiry tests |
 | API | `app/api/routes.py` + `app/main.py` — FastAPI, all ~50 UI endpoints, SSE telemetry, passkey-gated mutations | live smoke tests |
 | UI | React dashboard — all data comes from the real backend; explicit offline/error states, no mock fallbacks | `npx tsc --noEmit` |
+| MCP Server | `mcp-server/` — TypeScript MCP server (v2 SDK, 2026-07-28 spec), 35 tools + 5 resources + 4 prompts over stdio/HTTP | `cd mcp-server && npx tsc --noEmit` |
 
 **What is NOT here (honestly):** there is no LLM/"AI model" — every panel
 labeled "AI" runs deterministic statistical diagnostics (sensitivity re-runs,
@@ -66,7 +67,7 @@ switch, `cancel-all`, state overrides and history reset.
 ```bash
 cp .env.example .env          # add real keys if you have them
 docker compose up --build
-# frontend: http://localhost:3000   backend: http://localhost:8000
+# frontend: http://localhost:3000   backend: http://localhost:8000   MCP: http://localhost:4100/mcp
 ```
 
 ## Tests
@@ -83,6 +84,31 @@ Test notes:
 - Backtest/optimizer tests use deterministic synthetic candles **as fixtures**
   (standard practice) — the engines themselves only ever consume whatever
   candles they are given, and in production that means real Kraken OHLC.
+
+## MCP Server (LLM Integration)
+
+The `mcp-server/` directory contains a [Model Context Protocol](https://modelcontextprotocol.io) server built on the official [`@modelcontextprotocol/server`](https://github.com/modelcontextprotocol/typescript-sdk) v2 SDK. It exposes all of Projekt:Alpha's capabilities — Kraken trading, quant analytics, backtesting, genetic optimization, and strategy orchestration — to LLM clients like Claude Desktop.
+
+```bash
+# stdio mode (for Claude Desktop / MCP Inspector)
+cd mcp-server && npm install && npx tsx src/index.ts
+
+# HTTP mode (Streamable HTTP on :4100)
+cd mcp-server && npx tsx src/http-server.ts
+
+# MCP Inspector (interactive testing)
+cd mcp-server && npm run inspect
+```
+
+**35 tools**, **5 resources**, and **4 prompts** covering:
+- Dashboard & system status (health, credentials, logs, queue matrices)
+- Market data (OHLC, ledgers, futures positions, symbols)
+- Strategy management (create, update, archive, restore, P&L)
+- Quantitative analytics (Hurst DFA, regime, sentiment, M8 judge, watchdog)
+- Backtesting & genetic optimization (run, analyze, optimize, deploy)
+- Worker bot swarm (list, spawn from history, toggle, delete)
+
+See [`mcp-server/README.md`](mcp-server/README.md) for full details and Claude Desktop configuration.
 
 ## Execution model
 
@@ -124,9 +150,17 @@ app/
   api/                  routes (~50 endpoints the UI consumes) + app state
   telegram/             real Bot API HTTP client (optional notifications)
   security/             real .env manager (SettingsEnvManager)
-  mcp/                  MCP bridge wired to the real clients
+  mcp/                  Python MCP bridge wired to the real clients
+mcp-server/
+  src/index.ts          stdio transport entry point
+  src/http-server.ts    Streamable HTTP transport entry point (:4100)
+  src/server.ts         McpServer factory (35 tools + 5 resources + 4 prompts)
+  src/alphaClient.ts    HTTP client proxying to the FastAPI backend
+  src/tools/            tool registrations (dashboard, market, trading, quant, backtest, workers)
+  src/resources.ts      MCP resources (system status, strategies, workers, kraken)
+  src/prompts.ts        MCP prompts (market analysis, backtest, diagnostics, optimize)
 bin/
-  run.sh                local runner (venv + uvicorn + vite)
+  run.sh                local runner (venv + uvicorn + vite + mcp)
   m8-ctl                control CLI (status/halt/resume/cancel-all/sync/logs)
 tests/                  pytest suite (deterministic)
 src/                    React dashboard (all data from the real backend)
