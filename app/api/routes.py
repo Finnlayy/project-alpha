@@ -150,9 +150,35 @@ def credentials_status(request: Request):
 
 @router.post("/api/kraken/toggle-mode")
 async def toggle_mode(request: Request):
+    """Switch the execution mode between paper and live.
+
+    Contract: ``{"paperTrading": <bool>}`` — ``false`` means "go live".
+
+    Fail-closed input validation: this is the single most safety-critical
+    endpoint in the system, so an absent, misspelled or non-boolean
+    ``paperTrading`` key is rejected with HTTP 422 *before* anything is
+    mutated. It must never be possible for a malformed request to be answered
+    with ``{"success": true}`` while silently forcing the engine into a mode
+    the operator did not ask for.
+
+    Going live additionally requires a verified passkey session (401) and
+    configured Kraken credentials (412).
+    """
     app = _app(request)
-    body = await request.json()
-    to_live = body.get("paperTrading") is False
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=422, detail="request body must be valid JSON — execution mode unchanged")
+    if not isinstance(body, dict) or not isinstance(body.get("paperTrading"), bool):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                'execution mode switch requires an explicit boolean: {"paperTrading": true|false} '
+                "(false = live). Ambiguous or malformed requests are rejected fail-closed — "
+                "the execution mode was NOT changed."
+            ),
+        )
+    to_live = body["paperTrading"] is False
     if to_live:
         _require_session(request)  # passkey-gated per blueprint
         if not (app.settings.spot.configured or app.settings.futures.configured):

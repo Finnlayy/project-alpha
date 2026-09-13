@@ -15,8 +15,8 @@ real DuckDB data lake — with a single iron rule:
 
 | Subsystem | Implementation | Verification |
 |---|---|---|
-| Kraken Spot REST | `app/kraken/spot_client.py` — API-2 HMAC-SHA512 signing (nonce → hex → base64) | signature vectors vs. the spec (`tests/test_kraken_clients.py`) |
-| Kraken Futures v3 | `app/kraken/futures_client.py` — HMAC-SHA256(timestamp+method+path+body) | signature vectors vs. the spec |
+| Kraken Spot REST | `app/kraken/spot_client.py` — official `API-Sign` = base64(HMAC-SHA512(base64_decode(secret), path + SHA256(nonce + post_data))) | bit-exact vs. Kraken's published worked example (`tests/test_kraken_clients.py`) |
+| Kraken Futures v3 | `app/kraken/futures_client.py` — official `Authent` (auth flow of 2024-02-20) = base64(HMAC-SHA512(base64_decode(secret), SHA256(postData + nonce + endpointPath))), `endpointPath` without `/derivatives` | bit-exact vs. an independent transcription of the 5 documented steps |
 | Live market feed | `app/kraken/ws_service.py` — `wss://ws.kraken.com/v2`, ticker + ohlc-v1, heartbeat pings, exponential reconnect | SSE `/api/kraken/stream` |
 | Trading engine | `app/execution/trading_engine.py` — per-instance loops: strategy → M8 gate → churn guard + fee hurdle → leverage sizing → fill → autopsy → vault | integration tests (`tests/test_trading_engine.py`) |
 | M8 state machine | `app/execution/M8StateEngine.py` — ACTIVE/THROTTLED/QUARANTINED, budget multiplier, post-trade update | unit tests |
@@ -29,7 +29,7 @@ real DuckDB data lake — with a single iron rule:
 | Sessions | `app/auth/session.py` — HMAC-SHA256 signed tokens, revocation, TTL | round-trip/expiry tests |
 | API | `app/api/routes.py` + `app/main.py` — FastAPI, all ~50 UI endpoints, SSE telemetry, passkey-gated mutations | live smoke tests |
 | UI | React dashboard — all data comes from the real backend; explicit offline/error states, no mock fallbacks | `npx tsc --noEmit` |
-| MCP Server | `mcp-server/` — TypeScript MCP server (v2 SDK, 2026-07-28 spec), 35 tools + 5 resources + 4 prompts over stdio/HTTP | `cd mcp-server && npx tsc --noEmit` |
+| MCP Server | `mcp-server/` — TypeScript MCP server (v2 SDK, 2026-07-28 spec), 59 tools + 5 resources + 4 prompts over stdio/HTTP | `npm run type-check:mcp` |
 
 **What is NOT here (honestly):** there is no LLM/"AI model" — every panel
 labeled "AI" runs deterministic statistical diagnostics (sensitivity re-runs,
@@ -73,9 +73,16 @@ docker compose up --build
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest tests/ -q      # 80+ tests, all deterministic
-npx tsc --noEmit                          # frontend type check
+.venv/bin/python -m pytest tests/ -q      # deterministic suite, no network needed
+npm run type-check                        # React UI gate (root tsconfig, src/ only)
+npm run type-check:mcp                    # MCP server gate (mcp-server/tsconfig.json)
+npm run type-check:all                    # both
+npx vite build                            # production build of the dashboard
 ```
+
+The root `tsconfig.json` deliberately covers **only** the React UI (`src/`,
+`vite.config.ts`); `mcp-server/` is a separate package with its own tsconfig and
+dependencies, so it is type-checked by `type-check:mcp`.
 
 Test notes:
 - Kraken is not reachable from all CI/sandbox environments; the signing
@@ -100,7 +107,7 @@ cd mcp-server && npx tsx src/http-server.ts
 cd mcp-server && npm run inspect
 ```
 
-**35 tools**, **5 resources**, and **4 prompts** covering:
+**59 tools**, **5 resources** (`alpha://system/status`, `alpha://system/health`, `alpha://strategies/active`, `alpha://workers/active`, `alpha://kraken/status`), and **4 prompts** (`analyze-market`, `backtest-strategy`, `optimize-deploy`, `system-diagnostics`) covering:
 - Dashboard & system status (health, credentials, logs, queue matrices)
 - Market data (OHLC, ledgers, futures positions, symbols)
 - Strategy management (create, update, archive, restore, P&L)
@@ -154,7 +161,7 @@ app/
 mcp-server/
   src/index.ts          stdio transport entry point
   src/http-server.ts    Streamable HTTP transport entry point (:4100)
-  src/server.ts         McpServer factory (35 tools + 5 resources + 4 prompts)
+  src/server.ts         McpServer factory (59 tools + 5 resources + 4 prompts)
   src/alphaClient.ts    HTTP client proxying to the FastAPI backend
   src/tools/            tool registrations (dashboard, market, trading, quant, backtest, workers)
   src/resources.ts      MCP resources (system status, strategies, workers, kraken)
@@ -173,7 +180,18 @@ src/                    React dashboard (all data from the real backend)
 - **Funding & liquidation** figures for perps come from the live futures API
   when credentials exist; otherwise the UI shows `unconfigured` — never
   placeholder numbers.
+- **Credentials** are read from `.env` (`cp .env.example .env`). Every
+   variable is optional: with none set, the UI shows `not_configured` and the
+   private endpoints answer 412/424 — no key preview or balance is ever
+   invented.
 - **Lake data** lives in `data/` (gitignored). `bin/m8-ctl sync` ingests real
   candles; `/api/lake/compact` checkpoints DuckDB; Parquet export is atomic.
-- `setup_alpha.py` is the **legacy v1.6.4 skeleton bootstrap**; it refuses to
-  run against this repository (it would overwrite production code).
+- `setup_alpha.py` is the **frozen legacy v1.6.4 skeleton bootstrap**. Its
+   barrier is the first executable statement in the script, so nothing is
+   written before it decides: it refuses by default, refuses to target the
+   repository (or any parent of it), and refuses any target that already
+   contains v2.0 production code (`app/main.py`, `app/kraken/spot_client.py`,
+   `app/storage/lake.py`, `.git`). The only permitted use is writing the
+   historical scaffold to a fresh non-repository path with the explicit
+   `--i-understand-this-is-the-frozen-v1.6.4-skeleton` flag. Enforced by
+   `tests/test_legacy_barrier.py`.

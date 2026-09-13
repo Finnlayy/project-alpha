@@ -1,3 +1,6 @@
+// Root project = the React command-center UI (the `tsc --noEmit` gate for Phase 5).
+// mcp-server/ is a separate package with its own tsconfig + dependencies and is
+// type-checked via `npm run type-check:mcp`; it must never be pulled in here.
 {
   "compilerOptions": {
     "target": "ES2022",
@@ -22,5 +25,17 @@
     },
     "allowImportingTsExtensions": true,
     "noEmit": true
-  }
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "vite.config.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "mcp-server",
+    "data",
+    ".venv"
+  ]
 }

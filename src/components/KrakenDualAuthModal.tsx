@@ -172,7 +172,7 @@ export default function KrakenDualAuthModal({
                     ? 'bg-emerald-950 text-emerald-300 border-emerald-700'
                     : 'bg-zinc-800 text-zinc-400 border-zinc-700'
                 }`}>
-                  {spotConfigured ? '✓ Aktiv / Erkannt' : 'Simuliert'}
+                  {spotConfigured ? '✓ Aktiv / Erkannt' : 'Nicht konfiguriert'}
                 </span>
               </div>
 
@@ -215,8 +215,10 @@ export default function KrakenDualAuthModal({
 
                 <div className="pt-2 border-t border-zinc-800/60 flex justify-between items-center text-[10px]">
                   <span className="text-zinc-400">Aktiver Key-Status:</span>
-                  <span className="font-mono text-zinc-300 font-bold">
-                    {credentialsStatus?.spot.keyPreview || '9sPO••••vjo8Z (Spot)'}
+                  <span className={`font-mono font-bold ${
+                    credentialsStatus?.spot.keyPreview ? 'text-zinc-300' : 'text-amber-500/80 italic'
+                  }`}>
+                    {credentialsStatus?.spot.keyPreview || '— kein Key hinterlegt —'}
                   </span>
                 </div>
               </div>
@@ -243,7 +245,7 @@ export default function KrakenDualAuthModal({
                     ? 'bg-cyan-950 text-cyan-300 border-cyan-700'
                     : 'bg-zinc-800 text-zinc-400 border-zinc-700'
                 }`}>
-                  {futuresConfigured ? '✓ Aktiv / Erkannt' : 'Simuliert'}
+                  {futuresConfigured ? '✓ Aktiv / Erkannt' : 'Nicht konfiguriert'}
                 </span>
               </div>
 
@@ -285,8 +287,10 @@ export default function KrakenDualAuthModal({
 
                 <div className="pt-2 border-t border-zinc-800/60 flex justify-between items-center text-[10px]">
                   <span className="text-zinc-400">Aktiver Key-Status:</span>
-                  <span className="font-mono text-zinc-300 font-bold">
-                    {credentialsStatus?.futures.keyPreview || '7EG7••••JToFpf+ (Futures)'}
+                  <span className={`font-mono font-bold ${
+                    credentialsStatus?.futures.keyPreview ? 'text-zinc-300' : 'text-amber-500/80 italic'
+                  }`}>
+                    {credentialsStatus?.futures.keyPreview || '— kein Key hinterlegt —'}
                   </span>
                 </div>
               </div>

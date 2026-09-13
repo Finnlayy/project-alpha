@@ -41,10 +41,19 @@ class SettingsEnvManager:
 
     @staticmethod
     def mask_key(secret: Optional[str]) -> Optional[str]:
-        """Maskiert einen API-Key sicher für die Frontend-Übertragung (z.B. 9sPO••••vjo8Z)."""
+        """Maskiert einen API-Key sicher für die Frontend-Übertragung.
+
+        Beispiel: 'abcd1234…wxyz9876' -> 'abcd••••9876'. Bei fehlendem Key wird
+        ``None`` zurückgegeben — es wird NIEMALS ein Beispiel-/Platzhalter-Key
+        erfunden (Zero-Dummy-Garantie).
+        """
         if not secret:
             return None
         secret_clean = secret.strip()
+        if not secret_clean:
+            # whitespace-only == absent. Returning a mask here would fabricate
+            # the appearance of a configured key (Zero-Dummy-Garantie).
+            return None
         if len(secret_clean) <= 8:
             return "••••••••"
         return f"{secret_clean[:4]}••••{secret_clean[-4:]}"
@@ -103,8 +112,8 @@ class SettingsEnvManager:
             "anyConfigured": has_spot or has_futures,
             "spot": {
                 "configured": has_spot,
-                "keyPreview": self.mask_key(spot_key) if has_spot else "9sPO••••vjo8Z (sim)",
-                "source": "env" if has_spot else "simulated",
+                "keyPreview": self.mask_key(spot_key) if has_spot else "",
+                "source": "env" if has_spot else "not_configured",
                 "apiDomain": "api.kraken.com",
                 "displayName": "Spot-Trading-API",
                 "description": "Spot- und Margin-Trading, Fiat-Guthaben (EUR/USD), Cash Funding",
@@ -112,8 +121,8 @@ class SettingsEnvManager:
             },
             "futures": {
                 "configured": has_futures,
-                "keyPreview": self.mask_key(fut_key) if has_futures else "7EG7••••JToFpf+ (sim)",
-                "source": "env" if has_futures else "simulated",
+                "keyPreview": self.mask_key(fut_key) if has_futures else "",
+                "source": "env" if has_futures else "not_configured",
                 "apiDomain": "futures.kraken.com",
                 "displayName": "Futures-Trading-API (Kraken Pro)",
                 "description": "Perpetual Swaps (PF_XBTUSD, PF_ETHUSD), Derivatives Margin & Liquidation Risk",

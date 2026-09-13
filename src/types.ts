@@ -235,7 +235,10 @@ export interface KrakenProPosition {
 export interface KrakenCredentialDetails {
   configured: boolean;
   keyPreview?: string;
-  source?: 'env' | 'simulated';
+  /** 'env' = a real key loaded from the environment.
+   *  'not_configured' = no key present. The backend never reports a
+   *  fabricated/synthetic credential state (Zero-Dummy Guarantee). */
+  source?: 'env' | 'not_configured';
   apiDomain: string; // 'api.kraken.com' (Spot) vs 'futures.kraken.com' (Futures)
   displayName: string;
   description: string;

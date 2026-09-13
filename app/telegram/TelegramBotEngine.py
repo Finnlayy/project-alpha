@@ -57,8 +57,21 @@ class TelegramBotEngine:
     def _send_telegram_request(self, method_name: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Führt einen HTTPS-Request an die offizielle Telegram Bot API durch."""
         if not self.bot_token:
-            logger.info("Telegram-Token nicht konfiguriert; Mock-Ausführung von '%s': %s", method_name, payload)
-            return {"ok": True, "simulated": True, "result": payload}
+            # Zero-Dummy / fail-closed: ohne Token findet KEINE Zustellung statt.
+            # Es wird ausdrücklich kein Erfolg simuliert — der Aufrufer erhält
+            # einen typsicheren Offline-Zustand und muss diesen behandeln.
+            logger.warning(
+                "Telegram-Bot-Token nicht konfiguriert — '%s' wurde NICHT ausgeführt "
+                "(Zero-Dummy-Garantie: keine simulierte Zustellung).",
+                method_name,
+            )
+            return {
+                "ok": False,
+                "status": "offline",
+                "reason": "UNCONFIGURED_CREDENTIALS",
+                "method": method_name,
+                "error": "TELEGRAM_BOT_TOKEN ist nicht konfiguriert; Nachricht wurde nicht zugestellt.",
+            }
 
         api_url = f"https://api.telegram.org/bot{self.bot_token}/{method_name}"
         headers = {"Content-Type": "application/json"}
