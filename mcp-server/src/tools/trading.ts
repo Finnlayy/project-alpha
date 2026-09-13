@@ -32,7 +32,7 @@ export function registerTradingTools(server: McpServer, client: AlphaClient) {
     },
     async () => {
       try {
-        const data = await client.get("/api/strategies");
+        const data = await client.get("/api/strategies/templates");
         return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
       } catch (e: any) {
         return { content: [{ type: "text", text: `Error: ${e.message}` }], isError: true };
@@ -45,16 +45,24 @@ export function registerTradingTools(server: McpServer, client: AlphaClient) {
     "alpha_strategy_create",
     {
       description:
-        "Create a new strategy instance. Requires passkey-gated session for live trading mode.",
+        "Create a new strategy instance (always starts in paper mode). Call alpha_strategy_templates first for valid template names and params.",
       inputSchema: {
-        strategy: z.string().describe("Strategy template name (e.g. 'momentum_crossover', 'mean_reversion')"),
-        pair: z.string().describe("Trading pair (e.g. 'BTC/USD', 'ETH/USD.P')"),
+        strategy: z.string().describe("Strategy template name — see alpha_strategy_templates (e.g. 'EMA_TREND_RSI')"),
+        pair: z.string().default("BTC/USD").describe("Trading pair (e.g. 'BTC/USD')"),
         params: z.record(z.string(), z.any()).optional().describe("Strategy parameters — see strategy template for available params"),
+        name: z.string().optional().describe("Instance display name"),
+        interval: z.number().optional().describe("Bar interval in minutes (default: server default)"),
       },
     },
-    async ({ strategy, pair, params }) => {
+    async ({ strategy, pair, params, name, interval }) => {
       try {
-        const data = await client.post("/api/strategies", { strategy, pair, params });
+        const data = await client.post("/api/strategies", {
+          strategyType: strategy,
+          assetPair: pair,
+          parameters: params,
+          name,
+          interval,
+        });
         return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
       } catch (e: any) {
         return { content: [{ type: "text", text: `Error: ${e.message}` }], isError: true };
@@ -66,15 +74,18 @@ export function registerTradingTools(server: McpServer, client: AlphaClient) {
   server.registerTool(
     "alpha_strategy_update",
     {
-      description: "Update parameters of an existing strategy instance.",
+      description:
+        "Update name/parameters of an existing strategy instance. Queue switches (paper<->live) only apply while the instance is stopped.",
       inputSchema: {
         sid: z.string().describe("Strategy instance ID"),
-        params: z.record(z.string(), z.any()).describe("Updated parameters"),
+        params: z.record(z.string(), z.any()).optional().describe("Updated parameters"),
+        name: z.string().optional().describe("Updated display name"),
+        executionMode: z.enum(["paper", "live"]).optional().describe("Execution queue (only while stopped)"),
       },
     },
-    async ({ sid, params }) => {
+    async ({ sid, params, name, executionMode }) => {
       try {
-        const data = await client.put(`/api/strategies/${sid}`, { params });
+        const data = await client.put(`/api/strategies/${sid}`, { parameters: params, name, executionMode });
         return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
       } catch (e: any) {
         return { content: [{ type: "text", text: `Error: ${e.message}` }], isError: true };
@@ -167,7 +178,7 @@ export function registerTradingTools(server: McpServer, client: AlphaClient) {
     },
     async () => {
       try {
-        const data = await client.get("/api/dashboard/init");
+        const data = await client.get("/api/lake/summary");
         return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
       } catch (e: any) {
         return { content: [{ type: "text", text: `Error: ${e.message}` }], isError: true };

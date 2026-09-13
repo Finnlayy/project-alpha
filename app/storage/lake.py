@@ -112,10 +112,10 @@ class DataLake:
                 """INSERT OR REPLACE INTO instances VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 [
                     inst["id"], inst.get("strategy_type", ""), inst.get("name", ""), inst.get("symbol", ""),
-                    int(inst.get("interval_min", 15)), inst.get("mode", "paper"), inst.get("status", "active"),
-                    json.dumps(inst.get("params", {})), int(inst.get("created_at", time.time() * 1000)),
-                    int(inst.get("stopped_at", 0)) or None, inst.get("stop_reason"),
-                    float(inst.get("initial_balance", 0.0)), inst.get("genome_source"),
+                    int(inst.get("interval_min") or 15), inst.get("mode", "paper"), inst.get("status", "active"),
+                    json.dumps(inst.get("params", {})), int(inst.get("created_at") or time.time() * 1000),
+                    int(inst.get("stopped_at") or 0) or None, inst.get("stop_reason"),
+                    float(inst.get("initial_balance") or 0.0), inst.get("genome_source"),
                     inst.get("description", ""),
                 ],
             )

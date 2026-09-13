@@ -165,7 +165,14 @@ async def toggle_mode(request: Request):
 @router.post("/api/kraken/sync-balance")
 def sync_balance(request: Request):
     app = _app(request)
-    out: Dict[str, Any] = {"success": False}
+    out: Dict[str, Any] = {
+        "success": False,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "hasCredentials": app.settings.spot.configured or app.settings.futures.configured,
+        "hasSpotCredentials": app.settings.spot.configured,
+        "hasFuturesCredentials": app.settings.futures.configured,
+        "bothConfigured": app.settings.spot.configured and app.settings.futures.configured,
+    }
     if app.settings.spot.configured:
         try:
             bal = app.engine.spot.balance()
@@ -178,7 +185,7 @@ def sync_balance(request: Request):
             from app.kraken.futures_client import KrakenFuturesClient
 
             fut = KrakenFuturesClient(app.settings)
-            out["futuresBalances"] = fut.account_balances()
+            out["futuresBalances"] = fut.accounts()
             out["success"] = True
         except KrakenError as e:
             out["futuresError"] = str(e)
@@ -188,102 +195,516 @@ def sync_balance(request: Request):
 
 
 @router.get("/api/kraken/ledgers")
-def ledgers(request: Request):
+def ledgers(request: Request, asset: Optional[str] = None, limit: Optional[int] = None):
+    """Full account ledgers in the exact KrakenAccountLedgers shape the UI renders.
+
+    ?asset=BTC filters spot assets, ?limit=N caps both lists. `spot`/`pro` keys
+    are ALWAYS present (zeroed + `configured:false` when unusable) so consumers
+    never crash on missing keys.
+    """
+    from app.kraken.ledger_views import build_futures_ledger, build_spot_ledger
+
     app = _app(request)
     creds = _credentials_status(app)
-    out: Dict[str, Any] = {
+    spot = build_spot_ledger(app, asset_filter=asset, limit=limit)
+    pro = build_futures_ledger(app, limit=limit)
+    return {
         "mode": app.settings.execution_mode,
         "hasCredentials": creds["hasCredentials"],
         "hasSpotCredentials": creds["hasSpotCredentials"],
         "hasFuturesCredentials": creds["hasFuturesCredentials"],
         "credentialsStatus": creds,
         "lastSync": datetime.now(timezone.utc).isoformat(),
+        "spot": spot,
+        "pro": pro,
+        "spotSource": spot.get("source") or "unavailable",
+        "proSource": pro.get("source") or "unavailable",
+        "spotError": spot.get("error"),
+        "proError": pro.get("error"),
     }
-    if app.settings.spot.configured:
-        try:
-            raw = app.engine.spot.balance().get("result", {})
-            out["spot"] = {"assets": [{"asset": k, "amount": float(v)} for k, v in raw.items()]}
-            out["spotSource"] = "api.kraken.com (live)"
-        except KrakenError as e:
-            out["spotError"] = str(e)
-    else:
-        out["spotError"] = "not configured — set KRAKEN_SPOT_API_KEY / KRAKEN_SPOT_PRIVATE_KEY"
-    if app.settings.futures.configured:
-        try:
-            from app.kraken.futures_client import KrakenFuturesClient
 
-            fut = KrakenFuturesClient(app.settings)
-            pos = fut.positions() or []
-            out["pro"] = {
-                "positions": [
-                    {
-                        "id": p.get("id"),
-                        "pair": p.get("contract"),
-                        "type": "long" if int(p.get("size", 0)) > 0 else "short",
-                        "size": abs(int(p.get("size", 0))),
-                        "entryPrice": p.get("avgPrice"),
-                        "unrealizedPnLUSD": p.get("upl"),
-                        "status": "open",
-                    }
-                    for p in pos
-                ]
-            }
-            out["proSource"] = "futures.kraken.com (live)"
-        except KrakenError as e:
-            out["proError"] = str(e)
-    else:
-        out["proError"] = "not configured — set KRAKEN_FUTURES_API_KEY / KRAKEN_FUTURES_PRIVATE_KEY"
-    return out
+
+@router.post("/api/kraken/ledgers/sync")
+def ledgers_sync(request: Request):
+    """Force-refresh balances/positions from both Kraken venues (what the UI's
+    Sync button calls). Same enriched shapes as GET /api/kraken/ledgers."""
+    from app.kraken.ledger_views import build_futures_ledger, build_spot_ledger
+
+    app = _app(request)
+    spot = build_spot_ledger(app)
+    pro = build_futures_ledger(app)
+    ts = datetime.now(timezone.utc).isoformat()
+    app.bus.emit("info", "Ledgers", f"manual sync: spot_configured={spot.get('configured')} futures_configured={pro.get('configured')}")
+    return {
+        "success": spot.get("configured") or pro.get("configured"),
+        "timestamp": ts,
+        "lastSync": ts,
+        "spot": spot,
+        "pro": pro,
+        "hasCredentials": app.settings.spot.configured or app.settings.futures.configured,
+        "hasSpotCredentials": app.settings.spot.configured,
+        "hasFuturesCredentials": app.settings.futures.configured,
+        "bothConfigured": app.settings.spot.configured and app.settings.futures.configured,
+        "spotError": spot.get("error"),
+        "proError": pro.get("error"),
+    }
 
 
 @router.get("/api/kraken/positions/pro")
-def positions_pro(request: Request):
-    app = _app(request)
-    if not app.settings.futures.configured:
-        raise HTTPException(status_code=412, detail="Kraken Futures credentials not configured")
-    from app.kraken.futures_client import KrakenFuturesClient
+def positions_pro(request: Request, limit: Optional[int] = None):
+    """Normalized futures margin overview + positions (what MetricsPanel reads).
 
+    Returns an OBJECT {configured, positions, totalCollateralUSD, freeMarginUSD,
+    ...} — 200 even when unconfigured (with `configured:false` + error) so the
+    UI can render an explicit unconfigured state instead of fake fallbacks.
+    """
+    from app.kraken.ledger_views import build_futures_ledger
+
+    return build_futures_ledger(_app(request), limit=limit)
+
+
+@router.get("/api/kraken/symbols")
+def symbols(request: Request, venue: str = "all"):
+    """Kraken + Kraken Pro symbol catalog (public, no credentials needed).
+
+    ?venue=spot|futures|all (default all). Matches the UI's
+    KrakenAssetPairsResponse {total, symbols, quotes, popularSymbols} plus an
+    `errors` list when one venue is unreachable (partial results still return).
+    """
+    from app.kraken.ledger_views import normalize_asset
+
+    app = _app(request)
+    venue = (venue or "all").lower()
+    if venue not in ("spot", "futures", "all"):
+        raise HTTPException(status_code=422, detail="venue must be spot|futures|all")
+
+    syms: List[Dict[str, Any]] = []
+    errors: List[Dict[str, str]] = []
+
+    if venue in ("spot", "all"):
+        try:
+            raw = app.engine.spot.asset_pairs().get("result", {}) or {}
+            for key, v in raw.items():
+                base = normalize_asset(str(v.get("base", "")))
+                quote = normalize_asset(str(v.get("quote", "")))
+                wsname = v.get("wsname") or (f"{base}/{quote}" if base and quote else key)
+                syms.append(
+                    {
+                        "venue": "spot",
+                        "symbol": wsname,
+                        "altname": v.get("altname", key),
+                        "wsname": wsname,
+                        "base": base,
+                        "quote": quote,
+                        "status": str(v.get("status", "online")),
+                        "lotDecimals": v.get("lot_decimals", 8),
+                        "pairDecimals": v.get("pair_decimals", 5),
+                        "priceDecimals": v.get("pair_decimals", 5),  # legacy alias
+                        "ordermin": v.get("ordermin"),
+                        "minimumOrderSize": v.get("ordermin"),  # legacy alias
+                        "costmin": v.get("costmin"),
+                        "hasLeverage": bool(v.get("leverage_buy") or v.get("leverage_sell")),
+                        "leverageBuy": v.get("leverage_buy") or [],
+                        "leverageSell": v.get("leverage_sell") or [],
+                    }
+                )
+        except KrakenError as e:
+            errors.append({"venue": "spot", "error": str(e)[:200]})
+
+    if venue in ("futures", "all"):
+        try:
+            from app.kraken.futures_client import KrakenFuturesClient
+
+            payload = KrakenFuturesClient(app.settings).instruments()
+            for inst in payload.get("instruments") or []:
+                symbol = str(inst.get("symbol", ""))
+                if not symbol:
+                    continue
+                canon = KrakenFuturesClient.contract_to_symbol(symbol)
+                base, _, quote = canon.partition("/")
+                syms.append(
+                    {
+                        "venue": "futures",
+                        "symbol": symbol,
+                        "altname": symbol,
+                        "wsname": symbol,
+                        "base": base or symbol,
+                        "quote": quote or "",
+                        "canonical": canon,
+                        "status": "online" if not inst.get("suspended") else "suspended",
+                        "type": inst.get("type"),
+                        "underlying": inst.get("underlying"),
+                        "contractSize": inst.get("contractSize"),
+                        "tickSize": inst.get("tickSize"),
+                        "lotDecimals": 0,
+                        "pairDecimals": 1,
+                        "hasLeverage": True,
+                    }
+                )
+        except KrakenError as e:
+            errors.append({"venue": "futures", "error": str(e)[:200]})
+
+    if not syms:
+        raise HTTPException(status_code=502, detail=f"symbol catalog unavailable: {errors or 'empty upstream response'}")
+
+    quotes = sorted({s["quote"] for s in syms if s.get("quote")})
+    tracked = [s for s in syms if s.get("venue") == "spot" and s.get("symbol") in set(app.settings.tracked_symbols)]
+    popular = [s["symbol"] for s in (tracked or syms[:8])]
+    return {"total": len(syms), "symbols": syms, "quotes": quotes, "popularSymbols": popular, "errors": errors}
+
+
+# ------------------------------------------------- kraken spot (granular)
+@router.get("/api/kraken/spot/ticker")
+def spot_ticker(request: Request, pair: str = "BTC/USD"):
+    """Public L1 ticker for one pair (REST fallback when WS is down)."""
+    app = _app(request)
     try:
-        return KrakenFuturesClient(app.settings).positions() or []
+        raw = app.engine.spot.ticker([app.engine.spot.pair_to_native(pair)]).get("result", {})
+    except KrakenError as e:
+        raise HTTPException(status_code=502, detail=f"Kraken Ticker unavailable: {e}")
+    out = []
+    for native, v in raw.items():
+        try:
+            last = float(v["c"][0])
+            open_ = float(v["o"][0])
+        except (KeyError, IndexError, TypeError, ValueError):
+            continue
+        out.append({
+            "pair": app.engine.spot.native_to_pair(native),
+            "price": last, "lastPrice": last,
+            "bid": float(v["b"][0]) if v.get("b") else None,
+            "ask": float(v["a"][0]) if v.get("a") else None,
+            "change24h": round((last - open_) / open_ * 100.0, 4) if open_ else 0.0,
+            "high": float(v["h"][1]), "low": float(v["l"][1]),
+            "volume": float(v["v"][1]), "vwap": float(v["p"][1]),
+            "trades": int(v["t"][1]),
+            "source": "api.kraken.com (live REST)",
+        })
+    if not out:
+        raise HTTPException(status_code=502, detail=f"no ticker for {pair}")
+    return out[0] if len(out) == 1 else out
+
+
+@router.get("/api/kraken/spot/orderbook")
+def spot_orderbook(request: Request, pair: str = "BTC/USD", count: int = 20):
+    """Public L2 order book (Depth). count 1..500."""
+    app = _app(request)
+    try:
+        raw = app.engine.spot.depth(app.engine.spot.pair_to_native(pair), max(1, min(500, count))).get("result", {})
+    except KrakenError as e:
+        raise HTTPException(status_code=502, detail=f"Kraken Depth unavailable: {e}")
+    natives = [k for k in raw.keys()]
+    if not natives:
+        raise HTTPException(status_code=502, detail=f"no order book for {pair}")
+    book = raw[natives[0]]
+    return {
+        "pair": pair,
+        "bids": [[float(p), float(v), int(ts)] for p, v, ts in book.get("bids", [])],
+        "asks": [[float(p), float(v), int(ts)] for p, v, ts in book.get("asks", [])],
+        "source": "api.kraken.com (live REST)",
+    }
+
+
+@router.get("/api/kraken/spot/open-orders")
+def spot_open_orders(request: Request):
+    app = _app(request)
+    if not app.settings.spot.configured:
+        raise HTTPException(status_code=412, detail="Kraken Spot credentials not configured")
+    try:
+        return app.engine.spot.open_orders().get("result", {})
     except KrakenError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
 
-@router.get("/api/kraken/symbols")
-def symbols(request: Request):
+@router.get("/api/kraken/spot/closed-orders")
+def spot_closed_orders(request: Request):
     app = _app(request)
+    if not app.settings.spot.configured:
+        raise HTTPException(status_code=412, detail="Kraken Spot credentials not configured")
     try:
-        raw = app.engine.spot.asset_pairs().get("result", {})
+        return app.engine.spot.closed_orders().get("result", {})
     except KrakenError as e:
-        raise HTTPException(status_code=502, detail=f"Kraken AssetPairs unavailable: {e}")
-    want = {app.engine.spot.pair_to_native(s) for s in app.settings.tracked_symbols}
-    syms = []
-    for key, v in raw.items():
-        if key in want or key.replace("Z", "") in {w.replace("Z", "") for w in want}:
-            syms.append(
-                {
-                    "symbol": f"{v.get('base', key)}/{v.get('quote', '')}".strip("/"),
-                    "altname": v.get("altname", key),
-                    "wsname": v.get("wsname", key),
-                    "base": v.get("base"),
-                    "quote": v.get("quote"),
-                    "status": "online",
-                    "minimumOrderSize": v.get("ordermin"),
-                    "priceDecimals": v.get("decimals"),
-                    "lotDecimals": v.get("lot_decimals"),
-                }
-            )
-    return {"symbols": syms or list(raw.items())[:10]}
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.get("/api/kraken/spot/trades-history")
+def spot_trades_history(request: Request, type: str = "all"):
+    app = _app(request)
+    if not app.settings.spot.configured:
+        raise HTTPException(status_code=412, detail="Kraken Spot credentials not configured")
+    try:
+        return app.engine.spot.trades_history(type=type).get("result", {})
+    except KrakenError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.get("/api/kraken/spot/trade-balance")
+def spot_trade_balance(request: Request):
+    app = _app(request)
+    if not app.settings.spot.configured:
+        raise HTTPException(status_code=412, detail="Kraken Spot credentials not configured")
+    try:
+        return app.engine.spot.trade_balance().get("result", {})
+    except KrakenError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.get("/api/kraken/spot/ledger-entries")
+def spot_ledger_entries(request: Request, asset: Optional[str] = None, type: Optional[str] = None):
+    """Real Spot ledger entries (Ledgers endpoint: deposits, trades, fees...)."""
+    app = _app(request)
+    if not app.settings.spot.configured:
+        raise HTTPException(status_code=412, detail="Kraken Spot credentials not configured")
+    try:
+        return app.engine.spot.ledgers(asset=asset, ledger_type=type).get("result", {})
+    except KrakenError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.post("/api/kraken/spot/orders")
+async def spot_place_order(request: Request):
+    """Place a REAL Spot order (passkey-gated). Body: {pair, side, ordertype,
+    volume, price?, price2?, oflags?, validate?, leverage?}. validate=true dry-runs."""
+    app = _app(request)
+    _require_session(request)
+    if not app.settings.spot.configured:
+        raise HTTPException(status_code=412, detail="Kraken Spot credentials not configured")
+    body = await request.json()
+    try:
+        pair = body["pair"]
+        side = body["side"]
+        volume = float(body["volume"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="body needs {pair, side: buy|sell, volume, ordertype?, price?...}")
+    try:
+        res = app.engine.spot.add_order(
+            app.engine.spot.pair_to_native(pair), side,
+            body.get("ordertype", "limit"), volume,
+            price=body.get("price"), price2=body.get("price2"),
+            oflags=body.get("oflags", "post"), validate=bool(body.get("validate", False)),
+            leverage=body.get("leverage"),
+        )
+    except KrakenError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    app.bus.emit("warn" if not body.get("validate") else "info", "SpotOrder",
+                 f"{side} {volume} {pair} {body.get('ordertype', 'limit')} -> {res.get('result', res)}")
+    return res.get("result", res)
+
+
+@router.post("/api/kraken/spot/orders/{txid}/cancel")
+def spot_cancel_order(request: Request, txid: str):
+    app = _app(request)
+    _require_session(request)
+    if not app.settings.spot.configured:
+        raise HTTPException(status_code=412, detail="Kraken Spot credentials not configured")
+    try:
+        return app.engine.spot.cancel_order(txid).get("result", {})
+    except KrakenError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.post("/api/kraken/spot/orders/cancel-all")
+def spot_cancel_all(request: Request):
+    app = _app(request)
+    _require_session(request)
+    if not app.settings.spot.configured:
+        raise HTTPException(status_code=412, detail="Kraken Spot credentials not configured")
+    try:
+        res = app.engine.spot.cancel_all().get("result", {})
+    except KrakenError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    app.bus.emit("warn", "SpotOrder", f"cancel-all -> {res}")
+    return res
+
+
+# ----------------------------------------------- kraken futures (granular)
+def _fut(request: Request):
+    from app.kraken.futures_client import KrakenFuturesClient
+
+    return KrakenFuturesClient(_app(request).settings)
+
+
+@router.get("/api/kraken/futures/tickers")
+def futures_tickers(request: Request, symbol: Optional[str] = None):
+    """Public futures tickers (mark price, bid/ask, funding, OI). ?symbol=PF_XBTUSD filters."""
+    try:
+        return _fut(request).tickers(symbol=symbol)
+    except KrakenError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.get("/api/kraken/futures/instruments")
+def futures_instruments(request: Request):
+    """Public instrument catalog + contract specs."""
+    try:
+        return _fut(request).instruments()
+    except KrakenError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.get("/api/kraken/futures/orderbook")
+def futures_orderbook(request: Request, symbol: str = "PF_XBTUSD"):
+    """Public L2 order book for one futures symbol."""
+    try:
+        return _fut(request).orderbook(symbol)
+    except KrakenError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.get("/api/kraken/futures/history")
+def futures_history(request: Request, symbol: str = "PF_XBTUSD"):
+    """Public execution (trade) history for one futures symbol."""
+    try:
+        return _fut(request).history(symbol)
+    except KrakenError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.get("/api/kraken/futures/accounts")
+def futures_accounts(request: Request):
+    app = _app(request)
+    if not app.settings.futures.configured:
+        raise HTTPException(status_code=412, detail="Kraken Futures credentials not configured")
+    try:
+        return _fut(request).accounts()
+    except KrakenError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.get("/api/kraken/futures/open-orders")
+def futures_open_orders(request: Request):
+    app = _app(request)
+    if not app.settings.futures.configured:
+        raise HTTPException(status_code=412, detail="Kraken Futures credentials not configured")
+    try:
+        return _fut(request).open_orders()
+    except KrakenError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.get("/api/kraken/futures/fills")
+def futures_fills(request: Request):
+    app = _app(request)
+    if not app.settings.futures.configured:
+        raise HTTPException(status_code=412, detail="Kraken Futures credentials not configured")
+    try:
+        return _fut(request).fills()
+    except KrakenError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.post("/api/kraken/futures/orders")
+async def futures_place_order(request: Request):
+    """Place a REAL Futures order via sendorder (passkey-gated). Body: {symbol|pair,
+    side, size, orderType?, limitPrice?, stopPrice?, reduceOnly?, cliOrdId?,
+    triggerSignal?}. `pair: "BTC/USD"` auto-maps to PF_XBTUSD."""
+    from app.kraken.futures_client import KrakenFuturesClient
+
+    app = _app(request)
+    _require_session(request)
+    if not app.settings.futures.configured:
+        raise HTTPException(status_code=412, detail="Kraken Futures credentials not configured")
+    body = await request.json()
+    symbol = body.get("symbol") or (KrakenFuturesClient.symbol_to_contract(body["pair"]) if body.get("pair") else None)
+    try:
+        side = body["side"]
+        size = float(body["size"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="body needs {symbol|pair, side: buy|sell, size, orderType?, limitPrice?...}")
+    if not symbol:
+        raise HTTPException(status_code=422, detail="provide symbol (PF_XBTUSD) or pair (BTC/USD)")
+    try:
+        res = _fut(request).send_order(
+            symbol, side, size,
+            order_type=body.get("orderType", "lmt"),
+            limit_price=body.get("limitPrice"), stop_price=body.get("stopPrice"),
+            reduce_only=bool(body.get("reduceOnly", False)),
+            cli_ord_id=body.get("cliOrdId"), trigger_signal=body.get("triggerSignal"),
+        )
+    except KrakenError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    app.bus.emit("warn", "FuturesOrder", f"{side} {size} {symbol} -> {(res.get('sendStatus') or res)}")
+    return res
+
+
+@router.post("/api/kraken/futures/orders/cancel")
+async def futures_cancel_order(request: Request):
+    """Cancel one futures order. Body: {orderId?, cliOrdId?, symbol?}."""
+    app = _app(request)
+    _require_session(request)
+    if not app.settings.futures.configured:
+        raise HTTPException(status_code=412, detail="Kraken Futures credentials not configured")
+    body = await request.json()
+    try:
+        return _fut(request).cancel_order(order_id=body.get("orderId"), symbol=body.get("symbol"), cli_ord_id=body.get("cliOrdId"))
+    except KrakenError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@router.post("/api/kraken/futures/orders/cancel-all")
+async def futures_cancel_all(request: Request):
+    """Cancel all futures open orders. Optional body: {symbol} to scope one contract."""
+    app = _app(request)
+    _require_session(request)
+    if not app.settings.futures.configured:
+        raise HTTPException(status_code=412, detail="Kraken Futures credentials not configured")
+    body = {}
+    try:
+        if request.headers.get("content-type", "").startswith("application/json"):
+            body = await request.json()
+    except Exception:
+        pass
+    try:
+        res = _fut(request).cancel_all_orders(symbol=(body or {}).get("symbol"))
+    except KrakenError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    app.bus.emit("warn", "FuturesOrder", f"cancel-all({(body or {}).get('symbol', 'all')}) -> {res}")
+    return res
+
+
+@router.post("/api/kraken/futures/positions/close")
+async def futures_close_position(request: Request):
+    """Close a futures position with a reduce-only market order (passkey-gated).
+    Body: {symbol|pair, size?} — size omitted closes the full position."""
+    from app.kraken.futures_client import KrakenFuturesClient
+
+    app = _app(request)
+    _require_session(request)
+    if not app.settings.futures.configured:
+        raise HTTPException(status_code=412, detail="Kraken Futures credentials not configured")
+    body = await request.json()
+    symbol = body.get("symbol") or (KrakenFuturesClient.symbol_to_contract(body["pair"]) if body.get("pair") else None)
+    if not symbol:
+        raise HTTPException(status_code=422, detail="provide symbol (PF_XBTUSD) or pair (BTC/USD)")
+    try:
+        res = _fut(request).close_position(symbol, size=body.get("size"))
+    except KrakenError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    app.bus.emit("warn", "FuturesOrder", f"close {symbol} -> {(res.get('sendStatus') or res)}")
+    return res
 
 
 @router.get("/api/market-data")
-def market_data(request: Request):
+def market_data(request: Request, symbols: Optional[str] = None, pair: Optional[str] = None):
+    """Live L1 tickers for tracked symbols. Optional filter: ?symbols=BTC/USD,ETH/USD or ?pair=BTC/USD."""
     app = _app(request)
     tickers = app.ws.get_tickers()
+    wanted = {s.strip() for s in (symbols or "").split(",") if s.strip()}
+    if pair:
+        wanted.add(pair.strip())
+    if wanted:
+        tickers = [t for t in tickers if t.get("pair") in wanted]
     if not tickers and not app.ws.connected:
         # try one REST shot as last resort
         try:
-            raw = app.engine.spot.ticker([app.engine.spot.pair_to_native(s) for s in app.settings.tracked_symbols]).get("result", {})
+            wanted_syms = [s for s in app.settings.tracked_symbols if not wanted or s in wanted] or app.settings.tracked_symbols
+            raw = app.engine.spot.ticker([app.engine.spot.pair_to_native(s) for s in wanted_syms]).get("result", {})
             for native, v in raw.items():
                 last = float(v["c"][0])
                 open_ = float(v["o"][0])
@@ -308,37 +729,85 @@ def market_data(request: Request):
 
 @router.get("/api/kraken/stream")
 def kraken_stream(request: Request):
+    """Live Kraken SSE feed — plain `data:` messages (EventSource.onmessage).
+
+    Frames: {"type":"snapshot","tickers":[...]} once, then
+    {"type":"ticker","tickers":[...]} on price moves and
+    {"type":"ohlc_bar","bar":{symbol,pair,time,timestamp,open,high,low,close,volume,interval}}
+    on candle updates. Polls the WS cache directly (the LogBus only carries
+    log records, not market ticks).
+    """
     app = _app(request)
 
     def gen():
-        import queue as _queue
+        import time as _t
 
-        q = _queue.Queue(maxsize=500)
-
-        def cb(event, data):
-            if event in ("ticker", "status", "ws-message"):
-                q.put((event, data))
-
-        app.bus.subscribe(cb)
         try:
-            # initial snapshot
             t = app.ws.get_tickers()
             yield f"data: {json.dumps({'type': 'snapshot', 'tickers': t})}\n\n"
+            last_tick_sig = json.dumps(t, sort_keys=True, default=str)
+            last_bars: Dict[str, str] = {}
+            idle = 0
             while True:
-                try:
-                    event, data = q.get(timeout=15)
-                    yield f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
-                except _queue.Empty:
-                    yield f": keepalive {time.time()}\n\n"
+                _t.sleep(2.0)
+                # --- tickers on change ---
+                tickers = app.ws.get_tickers()
+                sig = json.dumps(tickers, sort_keys=True, default=str)
+                if sig != last_tick_sig:
+                    last_tick_sig = sig
+                    idle = 0
+                    yield f"data: {json.dumps({'type': 'ticker', 'tickers': tickers})}\n\n"
+                # --- candle bars on new/updated bar ---
+                for key, bar in app.ws.get_last_bars().items():
+                    bsig = f"{bar.get('timestamp')}:{bar.get('close')}:{bar.get('high')}:{bar.get('low')}:{bar.get('volume')}"
+                    if last_bars.get(key) != bsig:
+                        last_bars[key] = bsig
+                        idle = 0
+                        yield f"data: {json.dumps({'type': 'ohlc_bar', 'bar': bar})}\n\n"
+                # --- status heartbeat / keepalive ---
+                idle += 1
+                if idle % 8 == 0:
+                    st = app.ws.get_real_time_status()
+                    yield f"data: {json.dumps({'type': 'status', 'wsConnected': st['wsConnected'], 'cachedTickers': st['cachedTickers']})}\n\n"
+                else:
+                    yield f": keepalive {_t.time()}\n\n"
         except GeneratorExit:
             pass
-        finally:
-            app.bus.unsubscribe(cb)
 
-    return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive"})
+    return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
 
 
 # ---------------------------------------------------------------- strategies
+@router.get("/api/strategies/templates")
+def strategies_templates(request: Request):
+    """Available strategy templates: code, description, defaults, gene space.
+
+    What MCP `alpha_strategy_templates` and any 'new strategy' UI read BEFORE
+    creating an instance (distinct from /api/strategies which lists instances).
+    """
+    out = []
+    for name, cls in sorted(REGISTRY.items()):
+        strat = cls()
+        try:
+            defaults = strat.default_params()
+        except Exception:
+            defaults = {}
+        try:
+            space = {gene: {"min": lo, "max": hi, "integer": bool(is_int)} for gene, (lo, hi, is_int) in strat.param_space.items()}
+        except Exception:
+            space = {}
+        out.append({
+            "strategyType": name,
+            "name": getattr(strat, "name", name),
+            "description": getattr(strat, "description", ""),
+            "defaultParams": defaults,
+            "paramSpace": space,
+            "minBars": getattr(strat, "min_bars", 60),
+            "code": describe_strategy_code(name, defaults),
+        })
+    return {"templates": out, "total": len(out)}
+
+
 @router.get("/api/strategies")
 def strategies_list(request: Request):
     app = _app(request)
@@ -373,13 +842,14 @@ def _instance_to_strategy_view(i: Dict[str, Any]) -> Dict[str, Any]:
 async def strategies_create(request: Request):
     app = _app(request)
     body = await request.json()
-    strategy_type = body.get("strategyType") or body.get("strategy_type") or "EMA_TREND_RSI"
+    strategy_type = body.get("strategyType") or body.get("strategy_type") or body.get("strategy") or "EMA_TREND_RSI"
     if strategy_type not in REGISTRY:
         raise HTTPException(status_code=422, detail=f"unknown strategyType '{strategy_type}'. Known: {sorted(REGISTRY)}")
+    symbol = body.get("assetPair") or body.get("pair") or "BTC/USD"
     row = app.engine.start_instance(
         strategy_type=strategy_type,
-        name=body.get("name") or f"{strategy_type} on {body.get('assetPair', 'BTC/USD')}",
-        symbol=body.get("assetPair") or "BTC/USD",
+        name=body.get("name") or f"{strategy_type} on {symbol}",
+        symbol=symbol,
         interval_min=int(body.get("interval") or app.settings.default_interval),
         params=body.get("parameters") or body.get("params") or {},
         mode="paper" if body.get("executionMode") in (None, "paper") else "paper",  # UI creation always starts paper
@@ -396,9 +866,25 @@ async def strategies_update(request: Request, sid: str):
     body = await request.json()
     if body.get("name"):
         row["name"] = body["name"]
-    if body.get("parameters"):
-        row["params"] = body["parameters"]
+    params = body.get("parameters") or body.get("params")
+    if params:
+        row["params"] = params
+    if body.get("executionMode") in ("paper", "live") and body["executionMode"] != row.get("mode"):
+        # Queue switch only while the worker is NOT running (mode is load-bearing
+        # for sizing/fees/live routing — hot-switching would corrupt PnL).
+        if row.get("status") == "active":
+            raise HTTPException(status_code=409, detail="stop the instance before switching execution queues (paper<->live)")
+        row["mode"] = body["executionMode"]
     app.lake.upsert_instance(row)
+    # refresh the live runtime's params so a running worker picks them up
+    with app.engine._lock:
+        rt = app.engine.instances.get(sid)
+        if rt and params:
+            try:
+                rt.params = rt.strategy.clamp_genes(dict(params))
+                rt.spec["params"] = rt.params
+            except Exception:
+                pass
     return _instance_to_strategy_view(row)
 
 
@@ -633,8 +1119,8 @@ async def backtest_run(request: Request):
                 "entryTime": t.entry_time, "exitTime": t.exit_time,
                 "entryPrice": t.entry_price, "exitPrice": t.exit_price,
                 "amount": t.amount, "totalValue": t.notional_usd,
-                "fee": t.fee_usd, "pnl": t.net_pnl,
-                "pnlPercent": round(100.0 * t.net_pnl / t.notional_usd, 2) if t.notional_usd else 0.0,
+                "fee": t.fee_usd, "pnl": t.net_pnl_usd,
+                "pnlPercent": round(100.0 * t.net_pnl_usd / t.notional_usd, 2) if t.notional_usd else 0.0,
                 "mfePct": t.mfe_pct, "maePct": t.mae_pct,
                 "reason": t.exit_reason, "status": "closed",
             }
@@ -658,9 +1144,27 @@ async def backtest_analyze(request: Request):
         raise HTTPException(status_code=424, detail="insufficient real candles for diagnostics")
     summary = payload.get("summary") or {}
     trades = payload.get("trades") or []
+    ran_backtest = False
+    if not summary or not trades:
+        # MCP/direct callers send strategy params instead of a backtest result —
+        # run the real backtest inline so diagnostics never score empty data.
+        strategy_type = body.get("strategyType") or payload.get("strategyType") or "EMA_TREND_RSI"
+        if strategy_type not in REGISTRY:
+            raise HTTPException(status_code=422, detail=f"unknown strategy type {strategy_type}")
+        strategy = get_strategy(strategy_type)
+        params = body.get("parameters") or payload.get("parameters") or strategy.default_params()
+        bt = run_backtest(strategy, params, candles, BacktestConfig(initial_balance_usd=float(body.get("initialBalance") or 10000.0), bar_minutes=interval), pair=pair)
+        if not bt.ok:
+            raise HTTPException(status_code=422, detail=bt.error)
+        summary = bt.summary
+        trades = [{"pnl": t.net_pnl_usd, "mfePct": t.mfe_pct, "maePct": t.mae_pct, "reason": t.exit_reason} for t in bt.trades]
+        ran_backtest = True
 
     closes = [c["close"] for c in candles]
-    h = hurst_dfa(closes[-512:])
+    try:
+        h = hurst_dfa(closes[-512:])
+    except (ValueError, TypeError, ZeroDivisionError):
+        raise HTTPException(status_code=422, detail="Hurst DFA degenerate on this window (zero variance in log-returns) — no regime context available")
     regime = classify_regime(closes, [c["high"] for c in candles], [c["low"] for c in candles], interval)
 
     wins = [t for t in trades if t.get("pnl", 0) > 0]
@@ -684,6 +1188,7 @@ async def backtest_analyze(request: Request):
         "score": score,
         "confidenceScore": score,
         "verdict": verdict,
+        "ranBacktestInline": ran_backtest,
         "method": "statistical diagnostics (no LLM): DSR, Sharpe, win rate, drawdown, MFE/MAE capture, regime context — computed from real backtest output",
         "overallAssessment": f"DSR {dsr:.2f}, Sharpe {sharpe:.2f}, win rate {winrate:.1f}%, max DD {mdd:.2f}%. MFE/MAE capture {capture:.2f}.",
         "regimeContext": {"hurst": round(h, 3), "hurstRegime": hurst_regime(h), "ampel": regime["state"], "signal": regime["signal"]},
@@ -809,7 +1314,10 @@ def quant_hurst(request: Request, symbol: str = "BTC/USD"):
     if len(candles) < 200:
         raise HTTPException(status_code=424, detail=f"only {len(candles)} real candles for {symbol} — Hurst needs >= 200")
     closes = [c["close"] for c in candles]
-    h, curve, r2 = hurst_dfa_with_curve(closes[-512:])
+    try:
+        h, curve, r2 = hurst_dfa_with_curve(closes[-512:])
+    except (ValueError, TypeError, ZeroDivisionError):
+        raise HTTPException(status_code=422, detail="Hurst DFA degenerate on this window (zero variance in log-returns)")
     return {
         "symbol": symbol,
         "hurstExponent": round(h, 4),
@@ -852,10 +1360,12 @@ def quant_lead_lag(request: Request):
 
 @router.get("/api/quant/sentiment/score")
 @router.post("/api/quant/sentiment/score")
-async def quant_sentiment(request: Request):
+async def quant_sentiment(request: Request, symbol: Optional[str] = None):
     try:
         if request.headers.get("content-type", "").startswith("application/json"):
-            await request.json()  # UI sends {text} — accepted for compat, NOT used in scoring
+            body = await request.json()  # UI sends {text} — accepted for compat, NOT used in scoring
+            if isinstance(body, dict) and body.get("symbol") and not symbol:
+                symbol = body["symbol"]
     except Exception:
         pass
     app = _app(request)
@@ -864,12 +1374,13 @@ async def quant_sentiment(request: Request):
         from app.kraken.futures_client import KrakenFuturesClient
 
         fut = KrakenFuturesClient(app.settings)
+        contracts = [KrakenFuturesClient.symbol_to_contract(symbol)] if symbol else [
+            KrakenFuturesClient.symbol_to_contract(s) for s in ("BTC/USD", "ETH/USD", "SOL/USD")
+        ]
         rates = []
-        for contract in ("XBTUSD-P", "ETHUSD-P", "SOLUSD-P"):
+        for contract in contracts:
             fr = fut.funding_rates(contract)
-            if isinstance(fr, list):
-                rates.extend([float(x.get("fundingRate", 0.0)) for x in fr if x.get("fundingRate") is not None][:24])
-            elif isinstance(fr, dict) and fr.get("fundingRate") is not None:
+            if isinstance(fr, dict) and fr.get("fundingRate") is not None:
                 rates.append(float(fr["fundingRate"]))
         if rates:
             funding = rates
@@ -879,13 +1390,15 @@ async def quant_sentiment(request: Request):
     tickers = app.ws.get_tickers()
     momentum: Optional[float] = None
     spread: Optional[float] = None
-    btc = next((t for t in tickers if t["pair"] == "BTC/USD"), None)
-    if btc:
-        momentum = max(-1.0, min(1.0, btc["change24h"] / 3.0))
-        if btc.get("high") and btc.get("low") and btc["price"]:
-            spread = max(-1.0, min(1.0, (btc["high"] - btc["low"]) / btc["price"] * 50.0))
+    ref_pair = symbol if symbol in {t["pair"] for t in tickers} else "BTC/USD"
+    ref = next((t for t in tickers if t["pair"] == ref_pair), None)
+    if ref:
+        momentum = max(-1.0, min(1.0, ref["change24h"] / 3.0))
+        if ref.get("high") and ref.get("low") and ref["price"]:
+            spread = max(-1.0, min(1.0, (ref["high"] - ref["low"]) / ref["price"] * 50.0))
 
     res = sentiment_from_market_data(funding_rates=funding, momentum_score=momentum, spread_score=spread)
+    res["symbol"] = symbol or "BTC/USD,ETH/USD,SOL/USD (aggregate)"
     res["fundingSamples"] = len(funding) if funding else 0
     # UI aliases
     res["sentiment_score"] = res.get("score")
@@ -919,6 +1432,59 @@ def quant_m8_judge(request: Request, instance: Optional[str] = None):
         "openPosition": bool(rt.position),
         "lastError": rt.last_error,
     }
+
+
+_FUTURES_RISK_CACHE: Dict[str, Any] = {"at": 0.0, "snapshot": None}
+
+
+def _futures_risk_snapshot(app: AppState) -> Dict[str, Any]:
+    """Real futures margin snapshot for telemetry (15s TTL cache, best-effort).
+
+    Matches the UI's FuturesRiskTelemetry shape. Failures degrade to explicit
+    zeros + configured flag — the panel falls back to /api/kraken/ledgers.
+    """
+    now = time.time()
+    if now - _FUTURES_RISK_CACHE["at"] < 15.0 and _FUTURES_RISK_CACHE["snapshot"] is not None:
+        return _FUTURES_RISK_CACHE["snapshot"]
+    snap: Dict[str, Any] = {
+        "configured": app.settings.futures.configured,
+        "open_positions_count": 0,
+        "total_unrealized_pnl_usd": 0.0,
+        "unrealized_pnl_percent": 0.0,
+        "total_collateral_usd": 0.0,
+        "free_margin_usd": 0.0,
+        "used_margin_usd": 0.0,
+        "margin_level_percent": 100.0,
+        "effective_leverage": 0.0,
+        "nearest_liquidation_distance_percent": None,
+    }
+    if app.settings.futures.configured:
+        try:
+            from app.kraken.ledger_views import build_futures_ledger
+
+            pro = build_futures_ledger(app)
+            if pro.get("configured"):
+                dists = [
+                    abs(p["markPrice"] - p["liquidationPrice"]) / p["markPrice"] * 100.0
+                    for p in pro.get("positions", [])
+                    if p.get("markPrice") and p.get("liquidationPrice")
+                ]
+                snap.update({
+                    "open_positions_count": len(pro.get("positions", [])),
+                    "total_unrealized_pnl_usd": pro.get("totalUnrealizedPnL", 0.0),
+                    "unrealized_pnl_percent": pro.get("unrealizedPnLPercent", 0.0),
+                    "total_collateral_usd": pro.get("totalCollateralUSD", 0.0),
+                    "free_margin_usd": pro.get("freeMarginUSD", 0.0),
+                    "used_margin_usd": pro.get("usedMarginUSD", 0.0),
+                    "margin_level_percent": pro.get("marginLevelPercent", 100.0),
+                    "effective_leverage": pro.get("effectiveLeverage", 0.0),
+                    "nearest_liquidation_distance_percent": round(min(dists), 2) if dists else None,
+                })
+        except Exception:
+            pass
+    _FUTURES_RISK_CACHE["at"] = now
+    _FUTURES_RISK_CACHE["snapshot"] = snap
+    return snap
 
 
 @router.get("/api/quant/telemetry/stream")
@@ -969,7 +1535,7 @@ def telemetry_stream(request: Request):
                     "buffered_events_count": len(app.bus.buffer()),
                     "buffered_events": app.bus.buffer()[-15:],
                 },
-                "futures_risk": {"configured": app.settings.futures.configured, "open_positions_count": 0, "nearest_liquidation_distance_percent": None},
+                "futures_risk": _futures_risk_snapshot(app),
                 "spot_vault": {"vault_total_usd": app.lake.vault_total(), "paper_balance": app.lake.get_paper_balance("paper")},
                 "workers": app.engine.worker_view(),
                 "market_feed": "live" if app.ws.connected else "offline",
@@ -1238,12 +1804,16 @@ def lake_sync(request: Request):
     errors = []
     for symbol in app.settings.tracked_symbols:
         try:
-            payload = spot.ohlc(KrakenSpotClient.pair_to_native(symbol), app.settings.default_interval)
-            if payload:
-                native = list(payload.keys())[0]
-                rows = [{"time": int(r[0]), "open": float(r[1]), "high": float(r[2]), "low": float(r[3]), "close": float(r[4]), "volume": float(r[5]) if len(r) > 5 else 0.0} for r in payload[native]]
+            # Kraken envelope: {"error": [], "result": {<pair>: [[t,o,h,l,c,vwap,vol,count],...], "last": ...}}
+            result = (spot.ohlc(KrakenSpotClient.pair_to_native(symbol), app.settings.default_interval) or {}).get("result") or {}
+            natives = [k for k in result.keys() if k != "last"]
+            if natives:
+                native = natives[0]
+                rows = [{"time": int(r[0]), "open": float(r[1]), "high": float(r[2]), "low": float(r[3]), "close": float(r[4]), "volume": float(r[6]) if len(r) > 6 else 0.0} for r in result[native]]
                 n = app.lake.upsert_candles(symbol, app.settings.default_interval, rows)
                 synced.append({"symbol": symbol, "rows": n})
+            else:
+                errors.append({"symbol": symbol, "error": "empty result envelope"})
         except KrakenError as e:
             errors.append({"symbol": symbol, "error": str(e)[:160]})
     if errors and not synced:

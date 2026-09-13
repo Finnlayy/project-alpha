@@ -1,18 +1,33 @@
 """
-Real Kraken Futures (Pro) API v3 client (public + private).
+Real Kraken Futures (Pro) REST API v3 client (public + private).
 
-Private endpoints use the documented v3 authentication scheme:
+Base URL:  https://futures.kraken.com/derivatives/api/v3
+Docs:      https://docs.kraken.com/api/docs/futures-api/
+
+Private endpoints use the documented Futures authentication scheme
+(https://docs.futures.kraken.com/#http-api-http-api-introduction-authentication):
+
     headers:
-        Key       = API key
-        Timestamp = milliseconds since epoch
-        Signature = HMAC-SHA256( timestamp + method + path + body, secret ).hexdigest()
-    path = e.g. '/derivatives/api/v3/positions' (with query string for GET)
-Reference: https://docs.kraken.com/ft/api-docs/ft/v3#authentication
+        APIKey  = API key (public part)
+        Nonce   = ms-precision nonce (the SAME nonce used in the signature)
+        Authent = base64( HMAC-SHA512( base64decode(secret),
+                                       SHA256(postData + nonce + endpointPath) ) )
+    endpointPath = path WITHOUT the '/derivatives' prefix, e.g. '/api/v3/sendorder'
+    postData     = urlencoded params (query string for GET, form body for POST)
+
+Response envelope: {"result": "success"|"error", ...} — every private call must
+check result == "error" and surface payload["error"].
+
+Symbols: perpetuals are PF_XBTUSD / PF_ETHUSD (new) or PI_XBTUSD (legacy perp);
+dated contracts FI_XBTUSD_YYMMDD; indices in_xbtusd. This client targets the
+current PF_* perpetual symbols.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
+import threading
 import time
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
@@ -26,7 +41,11 @@ from app.kraken.spot_client import KrakenError
 class KrakenFuturesClient:
     """Synchronous Kraken Futures (Pro) REST client."""
 
-    API_PATH = "/derivatives/api/v3"
+    API_PATH = "/derivatives/api/v3"   # on the wire
+    SIGN_PREFIX = "/api/v3"            # what enters the Authent signature (no /derivatives)
+
+    _nonce_lock = threading.Lock()
+    _last_nonce = 0
 
     def __init__(self, settings: Settings, timeout: Optional[float] = None):
         self.settings = settings
@@ -34,160 +53,297 @@ class KrakenFuturesClient:
         self.timeout = timeout or settings.request_timeout
 
     # ------------------------------------------------------------------ auth
+    @classmethod
+    def _next_nonce(cls) -> str:
+        with cls._nonce_lock:
+            ms = int(time.time() * 1000)
+            if ms <= cls._last_nonce:
+                ms = cls._last_nonce + 1
+            cls._last_nonce = ms
+            return str(ms)
+
     @staticmethod
-    def sign_v3(timestamp_ms: str, method: str, path_with_query: str, body: str, secret: str) -> str:
-        message = f"{timestamp_ms}{method.upper()}{path_with_query}{body}".encode("utf-8")
-        return hmac.new(secret.encode("utf-8"), message, hashlib.sha256).hexdigest()
+    def sign_v3(post_data: str, nonce: str, endpoint_path: str, secret_b64: str) -> str:
+        """Official Futures Authent.
+
+        authent = base64(HMAC-SHA512(base64decode(secret), SHA256(postData + nonce + endpointPath)))
+        endpointPath excludes '/derivatives', e.g. '/api/v3/sendorder'.
+        """
+        try:
+            secret = base64.b64decode(secret_b64)
+        except Exception as exc:
+            raise KrakenError(f"Futures API secret is not valid base64: {exc}")
+        sha256 = hashlib.sha256(f"{post_data}{nonce}{endpoint_path}".encode("utf-8")).digest()
+        mac = hmac.new(secret, sha256, hashlib.sha512)
+        return base64.b64encode(mac.digest()).decode("utf-8")
 
     def _request(
         self,
         method: str,
-        endpoint: str,  # e.g. '/positions' (relative to API_PATH)
+        endpoint: str,  # e.g. '/tickers' (relative to API_PATH)
         params: Optional[Dict[str, Any]] = None,
-        json_body: Optional[Dict[str, Any]] = None,
         private: bool = False,
-    ) -> Any:
+    ) -> Dict[str, Any]:
         import json as _json
 
-        full_path = self.API_PATH + endpoint
-        query = f"?{urlencode(params)}" if params else ""
-        path_with_query = full_path + query
-        url = self.base + path_with_query
+        clean = {k: v for k, v in (params or {}).items() if v is not None}
+        # bools must serialize lowercase for urlencode
+        for k, v in list(clean.items()):
+            if isinstance(v, bool):
+                clean[k] = "true" if v else "false"
+        post_data = urlencode(clean)
 
-        body_str = ""
-        headers: Dict[str, str] = {"Content-Type": "application/json"}
-        if json_body is not None:
-            body_str = _json.dumps(json_body, separators=(",", ":"))
+        full_path = self.API_PATH + endpoint          # on the wire
+        sign_path = self.SIGN_PREFIX + endpoint       # into the signature
+        url = self.base + full_path
+        headers: Dict[str, str] = {"Accept": "application/json"}
+
+        if method == "GET" and post_data:
+            url += "?" + post_data
 
         if private:
             creds: KrakenCredentials = self.settings.futures
             if not creds.configured:
                 raise KrakenError("Kraken Futures credentials not configured (set KRAKEN_FUTURES_API_KEY / KRAKEN_FUTURES_PRIVATE_KEY).")
-            ts = str(int(time.time() * 1000))
+            nonce = self._next_nonce()
             headers.update(
                 {
-                    "Key": creds.api_key,
-                    "Timestamp": ts,
-                    "Signature": self.sign_v3(ts, method, path_with_query, body_str, creds.api_secret),
+                    "APIKey": creds.api_key,
+                    "Nonce": nonce,
+                    "Authent": self.sign_v3(post_data, nonce, sign_path, creds.api_secret),
                 }
             )
 
         try:
             with httpx.Client(timeout=self.timeout) as client:
-                resp = client.request(method, url, content=body_str or None, headers=headers)
+                if method == "GET":
+                    resp = client.get(url, headers=headers)
+                else:
+                    headers["Content-Type"] = "application/x-www-form-urlencoded"
+                    resp = client.post(url, content=post_data or None, headers=headers)
         except httpx.HTTPError as e:
             raise KrakenError(f"Kraken Futures network failure for {endpoint}: {type(e).__name__}: {str(e)[:160]}")
 
         text = resp.text
         try:
-            payload = _json.loads(text) if text else None
+            payload = _json.loads(text) if text else {}
         except Exception:
             raise KrakenError(f"Non-JSON response from Kraken Futures (HTTP {resp.status_code}): {text[:200]}", resp.status_code)
 
         if resp.status_code != 200:
-            errors = payload.get("errors") if isinstance(payload, dict) else None
-            raise KrakenError(
-                f"HTTP {resp.status_code} from {endpoint}: {errors or text[:200]}",
-                resp.status_code,
-                errors if isinstance(errors, list) else [],
-            )
+            err = payload.get("error") if isinstance(payload, dict) else None
+            raise KrakenError(f"HTTP {resp.status_code} from {endpoint}: {err or text[:200]}", resp.status_code)
 
-        if isinstance(payload, dict) and "result" in payload:
-            return payload["result"]
-        return payload
+        if isinstance(payload, dict) and payload.get("result") == "error":
+            raise KrakenError(f"Kraken Futures error for {endpoint}: {payload.get('error')}", resp.status_code)
+
+        return payload if isinstance(payload, dict) else {"result": payload}
 
     # ---------------------------------------------------------------- public
-    def instrument_specs(self) -> Any:
-        return self._request("GET", "/instrument-specs")
+    def tickers(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+        """All market tickers (mark price, bid/ask, funding, OI, 24h change).
 
-    def ticker(self, contract: str) -> Any:
-        """contract e.g. 'XBTUSD-P' (perpetual)."""
-        return self._request("GET", "/ticker", {"contract": contract})
+        symbol filter is case-insensitive, e.g. 'PF_XBTUSD'.
+        """
+        params = {"symbol": symbol} if symbol else None
+        return self._request("GET", "/tickers", params)
 
-    def candles(self, contract: str, since: Optional[int] = None, max_: int = 300) -> Any:
-        """Real OHLC candles for a futures contract. since: ms epoch (inclusive)."""
-        params: Dict[str, Any] = {"contract": contract, "max": max_}
-        if since:
-            params["since"] = since
-        return self._request("GET", "/candles", params)
+    def ticker(self, symbol: str) -> Dict[str, Any]:
+        """Single-contract ticker. symbol e.g. 'PF_XBTUSD'."""
+        payload = self._request("GET", "/tickers", {"symbol": symbol})
+        rows = payload.get("tickers") or []
+        if not rows:
+            raise KrakenError(f"no ticker for symbol '{symbol}'")
+        return rows[0]
 
-    def funding_rates(self, contract: str) -> Any:
-        return self._request("GET", "/funding-rates", {"contract": contract})
+    def instruments(self) -> Dict[str, Any]:
+        """All tradeable instruments + contract specs (size, tick, margin levels)."""
+        return self._request("GET", "/instruments")
 
-    def order_book(self, contract: str) -> Any:
-        return self._request("GET", "/order-book", {"contract": contract})
+    def instruments_status(self, instrument: Optional[str] = None) -> Dict[str, Any]:
+        params = {"instrument": instrument} if instrument else None
+        return self._request("GET", "/instruments/status", params)
 
-    def margin_info(self, contract: str) -> Any:
-        return self._request("GET", "/margin-info", {"contract": contract})
+    def orderbook(self, symbol: str) -> Dict[str, Any]:
+        """L2 orderbook snapshot for a symbol, e.g. 'PF_XBTUSD'."""
+        return self._request("GET", "/orderbook", {"symbol": symbol})
+
+    def history(self, symbol: str, last_id: Optional[int] = None) -> Dict[str, Any]:
+        """Public execution (trade) history for a symbol."""
+        params: Dict[str, Any] = {"symbol": symbol}
+        if last_id is not None:
+            params["lastId"] = last_id
+        return self._request("GET", "/history", params)
+
+    def funding_rates(self, symbol: str) -> Dict[str, Any]:
+        """Funding rate + prediction for a symbol (served from /tickers).
+
+        Returns {"symbol","fundingRate","fundingRatePrediction","markPrice","indexPrice"}.
+        """
+        t = self.ticker(symbol)
+        return {
+            "symbol": t.get("symbol", symbol),
+            "fundingRate": t.get("fundingRate"),
+            "fundingRatePrediction": t.get("fundingRatePrediction"),
+            "markPrice": t.get("markPrice"),
+            "indexPrice": t.get("indexPrice"),
+        }
 
     # -------------------------------------------------------------- private
-    def positions(self) -> Any:
-        return self._request("GET", "/positions", private=True)
+    def accounts(self) -> Dict[str, Any]:
+        """Wallets: per-currency balance, margin, PnL. Envelope: {"accounts": {...}}."""
+        return self._request("GET", "/accounts", private=True)
 
-    def account_balances(self) -> Any:
-        return self._request("GET", "/account/balances", private=True)
+    def open_positions(self) -> Dict[str, Any]:
+        """Open positions. Envelope: {"openPositions": [...]}."""
+        return self._request("GET", "/openpositions", private=True)
 
-    def open_orders(self, contract: Optional[str] = None) -> Any:
-        params = {"contract": contract} if contract else None
-        return self._request("GET", "/orders", params, private=True)
+    def open_orders(self) -> Dict[str, Any]:
+        """Open orders. Envelope: {"openOrders": [...]}."""
+        return self._request("GET", "/openorders", private=True)
 
-    def place_order(
+    def fills(self, last_fill_time: Optional[str] = None) -> Dict[str, Any]:
+        """Account fills (execution history). Envelope: {"fills": [...]}."""
+        params = {"lastFillTime": last_fill_time} if last_fill_time else None
+        return self._request("GET", "/fills", params, private=True)
+
+    def notifications(self) -> Dict[str, Any]:
+        return self._request("GET", "/notifications", private=True)
+
+    def account_log(self) -> Dict[str, Any]:
+        return self._request("GET", "/accountLog", private=True)
+
+    def send_order(
         self,
-        contract: str,
+        symbol: str,
         side: str,  # 'buy' | 'sell'
-        size: int,  # number of contracts (futures API uses whole contract units)
-        order_type: str = "limit",  # 'market' | 'limit'
-        price: Optional[float] = None,
-        post_only: bool = False,
+        size: float,  # number of contracts
+        order_type: str = "lmt",  # lmt|post|mkt|stp|take_profit|ioc|trailing_stop|fok
+        limit_price: Optional[float] = None,
+        stop_price: Optional[float] = None,
         reduce_only: bool = False,
-        client_order_id: Optional[str] = None,
-    ) -> Any:
-        """Real futures order placement (isolated margin default)."""
-        body: Dict[str, Any] = {
-            "contract": contract,
+        cli_ord_id: Optional[str] = None,
+        trigger_signal: Optional[str] = None,  # mark|index|last
+        leverage: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Real futures order placement. Returns {"sendStatus": {...order_id...}}."""
+        if side not in ("buy", "sell"):
+            raise ValueError("side must be 'buy' or 'sell'")
+        params: Dict[str, Any] = {
+            "orderType": order_type,
+            "symbol": symbol,
             "side": side,
             "size": size,
-            "type": order_type,
-            "margin": "isolated",
-            "timeInForce": "gtc",
+            "reduceOnly": reduce_only or None,
+            "limitPrice": limit_price,
+            "stopPrice": stop_price,
+            "cliOrdId": cli_ord_id,
+            "triggerSignal": trigger_signal,
+            "leverage": leverage,
         }
-        if price is not None and order_type != "market":
-            body["price"] = price
-        if post_only:
-            body["postOnly"] = True
-        if reduce_only:
-            body["reduceOnly"] = True
-        if client_order_id:
-            body["clOrdID"] = client_order_id
-        return self._request("POST", "/order", json_body=body, private=True)
+        return self._request("POST", "/sendorder", params, private=True)
 
-    def cancel_order(self, contract: str, order_id: str) -> Any:
-        return self._request("POST", f"/order/cancel/{order_id}", json_body={"contract": contract}, private=True)
+    def edit_order(
+        self,
+        order_id: Optional[str] = None,
+        cli_ord_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+        size: Optional[float] = None,
+        limit_price: Optional[float] = None,
+        stop_price: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {
+            "orderId": order_id,
+            "cliOrdId": cli_ord_id,
+            "symbol": symbol,
+            "size": size,
+            "limitPrice": limit_price,
+            "stopPrice": stop_price,
+        }
+        return self._request("POST", "/editorder", params, private=True)
 
-    def cancel_all(self, contract: str) -> Any:
-        return self._request("POST", "/order/cancel-all", json_body={"contract": contract}, private=True)
+    def cancel_order(
+        self,
+        order_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+        cli_ord_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if not order_id and not cli_ord_id:
+            raise ValueError("cancel_order needs order_id or cli_ord_id")
+        params: Dict[str, Any] = {"orderId": order_id, "symbol": symbol, "cliOrdId": cli_ord_id}
+        return self._request("POST", "/cancelorder", params, private=True)
 
-    def close_position(self, contract: str, position_id: str) -> Any:
-        return self._request("POST", f"/position/{position_id}/close", json_body={"contract": contract}, private=True)
+    def cancel_all_orders(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+        params = {"symbol": symbol} if symbol else None
+        return self._request("POST", "/cancelallorders", params, private=True)
 
-    def set_leverage(self, contract: str, leverage: int) -> Any:
-        return self._request("POST", "/leverage", json_body={"contract": contract, "leverage": leverage}, private=True)
+    def close_position(self, symbol: str, size: Optional[float] = None) -> Dict[str, Any]:
+        """Close (part of) a position with a reduce-only IOC order at mark.
 
-    def trade_history(self, contract: Optional[str] = None, max_: int = 100) -> Any:
-        params: Dict[str, Any] = {"max": max_}
+        The v3 API has no dedicated close endpoint — closing is a real
+        opposite-side reduceOnly order. size=None closes the full position.
+        """
+        payload = self.open_positions()
+        matches = [p for p in (payload.get("openPositions") or []) if str(p.get("symbol", "")).upper() == symbol.upper()]
+        if not matches:
+            raise KrakenError(f"no open position in {symbol} to close")
+        pos = matches[0]
+        side = "sell" if str(pos.get("side", "")).lower() == "long" else "buy"
+        qty = size if size is not None else float(pos.get("size") or 0)
+        if qty <= 0:
+            raise KrakenError(f"position in {symbol} has non-positive size ({pos.get('size')})")
+        return self.send_order(symbol, side, qty, order_type="mkt", reduce_only=True)
+
+    # ------------------------------------------------- compatibility aliases
+    # (older internal call sites; canonical names above match the v3 docs)
+    def positions(self) -> Dict[str, Any]:
+        return self.open_positions()
+
+    def account_balances(self) -> Dict[str, Any]:
+        return self.accounts()
+
+    def place_order(self, contract: str, side: str, size: float, order_type: str = "lmt",
+                    price: Optional[float] = None, post_only: bool = False,
+                    reduce_only: bool = False, client_order_id: Optional[str] = None) -> Dict[str, Any]:
+        otype = "post" if post_only and order_type == "lmt" else ("mkt" if order_type == "market" else order_type)
+        return self.send_order(contract, side, size, order_type=otype, limit_price=price,
+                               reduce_only=reduce_only, cli_ord_id=client_order_id)
+
+    def cancel_all(self, contract: Optional[str] = None) -> Dict[str, Any]:
+        return self.cancel_all_orders(symbol=contract)
+
+    def trade_history(self, contract: Optional[str] = None, max_: int = 100) -> Dict[str, Any]:
         if contract:
-            params["contract"] = contract
-        return self._request("GET", "/trade-history", params, private=True)
+            return self.history(contract)
+        return self.fills()
 
     # ------------------------------------------------------------------ util
     @staticmethod
-    def symbol_to_contract(symbol: str, perpetual: bool = True) -> str:
-        """'BTC/USD' -> 'XBTUSD-P' · 'ETH/USD' -> 'ETHUSD-P'."""
-        native = KrakenFuturesClient._spot_native(symbol)
-        return f"{native}-P" if perpetual else f"{native}-M"
+    def symbol_to_contract(symbol: str) -> str:
+        """'BTC/USD' -> 'PF_XBTUSD' · 'ETH/USD' -> 'PF_ETHUSD'.
+
+        Targets current perpetual (flexible futures) symbols. Case-insensitive
+        on the wire; uppercase is canonical.
+        """
+        base, _, quote = symbol.partition("/")
+        mapping = {"BTC": "XBT", "DOGE": "XDG", "LTC": "XLT"}
+        b = mapping.get(base.strip().upper(), base.strip().upper())
+        q = quote.strip().upper() or "USD"
+        return f"PF_{b}{q}"
 
     @staticmethod
-    def _spot_native(symbol: str) -> str:
-        mapping = {"BTC": "XBT", "DOGE": "XDG", "LTC": "XLT"}
-        base, _, quote = symbol.partition("/")
-        return mapping.get(base.upper(), base.upper()) + quote.upper()
+    def contract_to_symbol(contract: str) -> str:
+        """'PF_XBTUSD' -> 'BTC/USD' (best-effort inverse of symbol_to_contract)."""
+        core = contract.upper()
+        for prefix in ("PF_", "PI_", "FF_"):
+            if core.startswith(prefix):
+                core = core[len(prefix):]
+                break
+        if core.startswith("FI_"):  # dated: FI_XBTUSD_260327
+            core = core[3:].rsplit("_", 1)[0]
+        rev = {"XBT": "BTC", "XDG": "DOGE", "XLT": "LTC"}
+        for q in ("USD", "EUR", "GBP", "USDT", "USDC"):
+            if core.endswith(q) and len(core) > len(q):
+                b = core[: -len(q)]
+                return f"{rev.get(b, b)}/{q}"
+        return contract

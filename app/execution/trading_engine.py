@@ -180,13 +180,20 @@ class TradingEngine:
         for iid in ids:
             self.stop_instance(iid, "CANCEL_ALL")
             stopped.append(iid)
-        # real cancel of live orders
+        # real cancel of live orders (both venues)
         live_errors = []
         if self.settings.spot.configured:
             try:
                 self.spot.cancel_all()
             except KrakenError as e:
                 live_errors.append(f"spot: {e}")
+        if self.settings.futures.configured:
+            try:
+                from app.kraken.futures_client import KrakenFuturesClient
+
+                KrakenFuturesClient(self.settings).cancel_all_orders()
+            except KrakenError as e:
+                live_errors.append(f"futures: {e}")
         self.bus.emit("warn", "Emergency", f"cancel-all: {len(stopped)} instances stopped; live order cancel attempted" + (f" ({'; '.join(live_errors)})" if live_errors else ""))
         return {"ok": True, "stoppedInstances": stopped, "liveErrors": live_errors}
 
@@ -221,13 +228,16 @@ class TradingEngine:
         symbol = rt.spec["symbol"]
         iv = int(rt.spec["interval_min"])
         # 1) live REST (authoritative)
+        # Kraken envelope: {"error": [], "result": {<pair>: [[t,o,h,l,c,vwap,vol,count],...], "last": ...}}
         try:
             payload = self.spot.ohlc(KrakenSpotClient.pair_to_native(symbol), iv)
-            if payload:
-                native = list(payload.keys())[0]
+            result = (payload or {}).get("result") or {}
+            natives = [k for k in result.keys() if k != "last"]
+            if natives:
+                native = natives[0]
                 rows = [
-                    {"time": int(r[0]), "open": float(r[1]), "high": float(r[2]), "low": float(r[3]), "close": float(r[4]), "volume": float(r[5]) if len(r) > 5 else 0.0}
-                    for r in payload[native]
+                    {"time": int(r[0]), "open": float(r[1]), "high": float(r[2]), "low": float(r[3]), "close": float(r[4]), "volume": float(r[6]) if len(r) > 6 else 0.0}
+                    for r in result[native]
                 ]
                 self.lake.upsert_candles(symbol, iv, rows[-400:])
                 if rows:
@@ -507,14 +517,32 @@ class TradingEngine:
     # ---------------------------------------------------------------- live
     def _place_live_order(self, rt: InstanceRuntime, action: str, sizing: Optional[Any]) -> None:
         """Place the REAL Kraken order for live instances. Failures are logged;
-        the paper shadow position keeps running as the source of truth."""
+        the paper shadow position keeps running as the source of truth.
+
+        Routing: market_type == "PERP" -> Kraken Futures sendorder,
+        otherwise -> Kraken Spot AddOrder (post-only limit).
+        """
+        from app.kraken.futures_client import KrakenFuturesClient
+
         spec = rt.spec
-        native = KrakenSpotClient.pair_to_native(spec["symbol"])
+        is_perp = spec.get("market_type") == "PERP"
         try:
             if action == "open" and sizing is not None:
                 side = "buy" if sizing.direction == "LONG" else "sell"
-                res = self.spot.add_order(native, side, "limit", sizing.quantity_contracts, price=rt.position["entry_price"] if rt.position else None, oflags="post")
-                self.bus.emit("info", "KrakenLive", f"order placed: {res.get('result', res)}", spec["id"])
+                price = rt.position["entry_price"] if rt.position else None
+                if is_perp:
+                    if not self.settings.futures.configured:
+                        raise KrakenError("live PERP order needs KRAKEN_FUTURES_API_KEY / KRAKEN_FUTURES_PRIVATE_KEY")
+                    fut = KrakenFuturesClient(self.settings)
+                    contract = KrakenFuturesClient.symbol_to_contract(spec["symbol"])
+                    res = fut.send_order(contract, side, sizing.quantity_contracts, order_type="post" if price else "mkt", limit_price=price)
+                    self.bus.emit("info", "KrakenLive", f"futures order placed: {(res.get('sendStatus') or res)}", spec["id"])
+                else:
+                    if not self.settings.spot.configured:
+                        raise KrakenError("live spot order needs KRAKEN_SPOT_API_KEY / KRAKEN_SPOT_PRIVATE_KEY")
+                    native = KrakenSpotClient.pair_to_native(spec["symbol"])
+                    res = self.spot.add_order(native, side, "limit", sizing.quantity_contracts, price=price, oflags="post")
+                    self.bus.emit("info", "KrakenLive", f"spot order placed: {res.get('result', res)}", spec["id"])
             else:
                 self.bus.emit("warn", "KrakenLive", "close action deferred to ClosePosition/manual (not auto-fired to avoid runaway live orders)", spec["id"])
         except KrakenError as e:

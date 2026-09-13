@@ -17,13 +17,14 @@ LLM Client (Claude Desktop / Inspector / custom)
 │                                      │
 │  Tools:                              │
 │  ├─ Dashboard & system status (6)    │
-│  ├─ Market data & Kraken (5)         │
-│  ├─ Strategy management (8)          │
+│  ├─ Market data (5)                  │
+│  ├─ Kraken Spot & Futures (23)       │
+│  ├─ Strategy management (9)          │
 │  ├─ Quant analytics (6)              │
 │  ├─ Backtesting & optimizer (4)      │
 │  └─ Worker bot swarm (6)             │
 │                                      │
-│  35 tools total                      │
+│  59 tools total                      │
 └──────────┬───────────────────────────┘
            │  HTTP (REST)
            ▼
@@ -92,7 +93,7 @@ Add to your `claude_desktop_config.json`:
 }
 ```
 
-## Available Tools (35)
+## Available Tools (59)
 
 ### Dashboard & System (6)
 
@@ -115,7 +116,37 @@ Add to your `claude_desktop_config.json`:
 | `alpha_kraken_symbols` | Available trading symbols on Kraken |
 | `alpha_backtest_ohlc` | OHLC candle data for backtesting |
 
-### Strategy Management (8)
+### Kraken Spot & Futures (23)
+
+Spot reads are public unless noted; order tools are passkey-gated server-side.
+
+| Tool | Description |
+|------|-------------|
+| `alpha_spot_ticker` | Spot L1 ticker for one pair (public) |
+| `alpha_spot_orderbook` | Spot L2 order book (public) |
+| `alpha_spot_open_orders` | Open Spot orders (credentials) |
+| `alpha_spot_closed_orders` | Recently closed Spot orders (credentials) |
+| `alpha_spot_trades_history` | Spot trade history / fills (credentials) |
+| `alpha_spot_trade_balance` | Spot margin overview — equity, margin, P&L (credentials) |
+| `alpha_spot_ledger_entries` | Real Spot ledger entries — deposits, trades, fees (credentials) |
+| `alpha_spot_place_order` | Place a REAL Spot order, `validate` dry-run supported |
+| `alpha_spot_cancel_order` | Cancel one Spot order by txid |
+| `alpha_spot_cancel_all` | Cancel ALL Spot open orders |
+| `alpha_futures_tickers` | Futures tickers — mark, bid/ask, funding, OI (public) |
+| `alpha_futures_instruments` | Futures instrument catalog + contract specs (public) |
+| `alpha_futures_orderbook` | Futures L2 order book (public) |
+| `alpha_futures_history` | Public futures execution history (public) |
+| `alpha_futures_accounts` | Futures wallets — balances, margin, P&L (credentials) |
+| `alpha_futures_open_orders` | Open Futures orders (credentials) |
+| `alpha_futures_fills` | Futures fills / execution history (credentials) |
+| `alpha_futures_place_order` | Place a REAL Futures order via sendorder |
+| `alpha_futures_cancel_order` | Cancel one Futures order |
+| `alpha_futures_cancel_all` | Cancel all Futures orders (optional contract scope) |
+| `alpha_futures_close_position` | Close a position via reduce-only market order |
+| `alpha_kraken_sync_balance` | Force-refresh Spot + Futures balances |
+| `alpha_kraken_toggle_mode` | Switch execution mode paper <-> live |
+
+### Strategy Management (9)
 
 | Tool | Description |
 |------|-------------|
