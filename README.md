@@ -29,7 +29,7 @@ real DuckDB data lake — with a single iron rule:
 | Sessions | `app/auth/session.py` — HMAC-SHA256 signed tokens, revocation, TTL | round-trip/expiry tests |
 | API | `app/api/routes.py` + `app/main.py` — FastAPI, all ~50 UI endpoints, SSE telemetry, passkey-gated mutations | live smoke tests |
 | UI | React dashboard — all data comes from the real backend; explicit offline/error states, no mock fallbacks | `npx tsc --noEmit` |
-| MCP Server | `mcp-server/` — TypeScript MCP server (v2 SDK, 2026-07-28 spec), 59 tools + 5 resources + 4 prompts over stdio/HTTP | `npm run type-check:mcp` |
+| MCP Server | `mcp-server/` — TypeScript MCP server (v2 SDK, 2026-07-28 spec), 59 tools + 8 resources + 4 prompts over stdio/HTTP | `npm run type-check:mcp` |
 
 **What is NOT here (honestly):** there is no LLM/"AI model" — every panel
 labeled "AI" runs deterministic statistical diagnostics (sensitivity re-runs,
@@ -107,7 +107,7 @@ cd mcp-server && npx tsx src/http-server.ts
 cd mcp-server && npm run inspect
 ```
 
-**59 tools**, **5 resources** (`alpha://system/status`, `alpha://system/health`, `alpha://strategies/active`, `alpha://workers/active`, `alpha://kraken/status`), and **4 prompts** (`analyze-market`, `backtest-strategy`, `optimize-deploy`, `system-diagnostics`) covering:
+**59 tools**, **8 resources** (`kraken://positions`, `kraken://status`, `m8://state`, `lake://candles/{symbol}`, `alpha://system/status`, `alpha://system/health`, `alpha://strategies/active`, `alpha://workers/active`), and **4 prompts** (`analyze-market`, `backtest-strategy`, `optimize-deploy`, `system-diagnostics`) covering:
 - Dashboard & system status (health, credentials, logs, queue matrices)
 - Market data (OHLC, ledgers, futures positions, symbols)
 - Strategy management (create, update, archive, restore, P&L)
@@ -161,10 +161,10 @@ app/
 mcp-server/
   src/index.ts          stdio transport entry point
   src/http-server.ts    Streamable HTTP transport entry point (:4100)
-  src/server.ts         McpServer factory (59 tools + 5 resources + 4 prompts)
+  src/server.ts         McpServer factory (59 tools + 8 resources + 4 prompts)
   src/alphaClient.ts    HTTP client proxying to the FastAPI backend
   src/tools/            tool registrations (dashboard, market, trading, quant, backtest, workers)
-  src/resources.ts      MCP resources (system status, strategies, workers, kraken)
+  src/resources.ts      MCP resources, each wired to one named backend route
   src/prompts.ts        MCP prompts (market analysis, backtest, diagnostics, optimize)
 bin/
   run.sh                local runner (venv + uvicorn + vite + mcp)

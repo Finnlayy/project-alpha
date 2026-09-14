@@ -9,7 +9,8 @@
     "start:http": "tsx src/http-server.ts",
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc --noEmit",
-    "inspect": "npx @modelcontextprotocol/inspector tsx src/index.ts"
+    "inspect": "npx @modelcontextprotocol/inspector tsx src/index.ts",
+    "verify:resources": "node scripts/verify-resources.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.0.0",

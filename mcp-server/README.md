@@ -25,6 +25,7 @@ LLM Client (Claude Desktop / Inspector / custom)
 │  └─ Worker bot swarm (6)             │
 │                                      │
 │  59 tools total                      │
+│  8 resources + 4 prompts             │
 └──────────┬───────────────────────────┘
            │  HTTP (REST)
            ▼
@@ -191,6 +192,71 @@ Spot reads are public unless noted; order tools are passkey-gated server-side.
 | `alpha_workers_toggle` | Toggle a worker between active/paused |
 | `alpha_workers_delete` | Stop and delete a worker |
 
+## Resources (8)
+
+Read-only live views. Each resource proxies **exactly one** FastAPI route; the
+mapping is part of the contract and is reported back in the degraded envelope,
+so a failure always names the address that was queried.
+
+| URI | Backend address | Returns |
+|-----|-----------------|---------|
+| `kraken://positions` | `GET /api/kraken/positions/pro` | Kraken Pro position & margin state (collateral, free/used margin, margin level, unrealised PnL). `configured:false` with explicit zeros when futures keys are absent. |
+| `kraken://status` | `GET /api/kraken/status` | REST latency/availability, WS v2 feed state, reconnect attempts, credential presence. |
+| `m8://state` | `GET /api/quant/execution/m8-judge` | M8 verdict for the active instance: state, current/base budget, budget multiplier on Kelly sizing, churn risk, consecutive losses. |
+| `lake://candles/{symbol}` | `GET /api/lake/query?symbol=<symbol>&limit=<n>` | Real DuckDB OHLC candles, newest first. Template — see encoding note below. |
+| `alpha://system/status` | `GET /api/dashboard/init` | Full dashboard payload: mode, uptime, credentials, lake health, instances, feed status. |
+| `alpha://system/health` | `GET /api/health` | Minimal liveness probe. |
+| `alpha://strategies/active` | `GET /api/strategies` | All strategy instances with state, P&L and M8 health. |
+| `alpha://workers/active` | `GET /api/quant/workers` | The worker-bot swarm (real running instances). |
+
+`lake://candles/{symbol}` is a URI **template**, so the symbol is a path segment
+and its slash must be percent-encoded:
+
+```
+lake://candles/BTC%2FUSD          -> /api/lake/query?symbol=BTC/USD
+lake://candles/BTC%2FUSD?limit=50 -> /api/lake/query?symbol=BTC/USD&limit=50
+```
+
+`limit` defaults to 200 and is capped at 5000.
+
+### Degraded states, not dummy data
+
+When a source is genuinely unavailable the resource returns an explicit envelope
+naming the reason and the address that was queried — never placeholder numbers:
+
+```json
+{
+  "status": "offline",
+  "reason": "HTTP_404",
+  "httpStatus": 404,
+  "detail": "no running instances — start a strategy first",
+  "resource": "m8://state",
+  "backend": "http://127.0.0.1:8000/api/quant/execution/m8-judge",
+  "note": "Zero-Dummy Guarantee: no synthetic data is substituted for an unavailable source."
+}
+```
+
+`BACKEND_UNREACHABLE` is reported when the backend does not answer at all, which
+is distinguishable from a route that answered 4xx/5xx.
+
+## Prompts (4)
+
+`analyze-market`, `backtest-strategy`, `optimize-deploy`, `system-diagnostics`.
+
+## Verifying the wiring
+
+`scripts/verify-resources.mjs` performs a real Streamable-HTTP MCP handshake and
+reads every registered resource, printing the URI, whether the payload is real
+data or an explicit degraded state, and the backend address it resolved to:
+
+```bash
+# terminal 1: backend          terminal 2: MCP server
+./bin/run.sh backend           cd mcp-server && npm run start:http
+
+# terminal 3
+cd mcp-server && npm run verify:resources
+```
+
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -208,7 +274,8 @@ Consistent with the rest of Projekt:Alpha, this MCP server returns **real data o
 ```bash
 cd mcp-server
 npm install
-npm run typecheck    # TypeScript type checking
-npm run dev          # Watch mode (auto-reload on changes)
-npm run inspect      # MCP Inspector for interactive testing
+npm run typecheck           # TypeScript type checking
+npm run dev                 # Watch mode (auto-reload on changes)
+npm run inspect             # MCP Inspector for interactive testing
+npm run verify:resources    # real MCP handshake + read every resource
 ```
