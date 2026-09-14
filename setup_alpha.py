@@ -15,6 +15,82 @@ import sys
 HOME_DIR = os.path.expanduser("~")
 TARGET_BASE = os.path.join(HOME_DIR, "Downloads", "Projekt_Alpha")
 
+# ---------------------------------------------------------------------------
+# INVARIANT 3.4 - LEGACY BARRIER  (MUST run before ANY filesystem mutation)
+# ---------------------------------------------------------------------------
+# This script is the ORIGINAL v1.6.4 skeleton bootstrap. The repository now
+# contains the real Kraken Pro Execution System v2.0 (FastAPI backend in app/,
+# signed Kraken REST clients, DuckDB lake, React command center). Re-running
+# the skeleton generator would overwrite production code with v1.6.4 stubs, so
+# the script is FROZEN and fails closed:
+#
+#   * it refuses to target the production repository (or any parent of it),
+#   * it refuses to target a directory that already holds v2.0 production code,
+#   * it refuses to run at all unless the operator passes the explicit
+#     override flag below. Writing the historical scaffold to a fresh,
+#     non-repository path is the only permitted use.
+#
+# The barrier is deliberately the FIRST executable statement. The previous
+# revision created the whole directory tree at import time and only checked
+# TARGET_BASE/app/main.py afterwards, so on any machine without a pre-existing
+# ~/Downloads/Projekt_Alpha the v1.6.4 skeleton was written and the script
+# exited 0 - the guard never fired.
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+LEGACY_OVERRIDE_FLAG = "--i-understand-this-is-the-frozen-v1.6.4-skeleton"
+PRODUCTION_MARKERS = (
+    os.path.join("app", "main.py"),
+    os.path.join("app", "kraken", "spot_client.py"),
+    os.path.join("app", "storage", "lake.py"),
+    ".git",
+)
+
+
+def _legacy_barrier():
+    """Fail-closed gate for the frozen v1.6.4 bootstrap. Exits 1 on refusal."""
+    target = os.path.abspath(TARGET_BASE)
+    repo = os.path.abspath(REPO_ROOT)
+
+    def refuse(reason, extra=()):
+        print("=" * 60)
+        print(" \u270b setup_alpha.py ist ein EINGEFRORENES Legacy-Skript (v1.6.4).")
+        print("=" * 60)
+        print("   Abgebrochen: " + reason)
+        for line in extra:
+            print("   " + line)
+        print("")
+        print("   Dieses Repository enthaelt das echte Ausfuehrungssystem")
+        print("   (Kraken Pro Execution System v2.0). Der Scaffold wuerde")
+        print("   Produktionscode mit v1.6.4-Stubs ueberschreiben.")
+        print("   Setup-Anleitung: README.md (Venv, .env, ./bin/run.sh, docker compose).")
+        raise SystemExit(1)
+
+    # 1. never write into (or over) the production repository
+    if target == repo or target.startswith(repo + os.sep):
+        refuse("Zielpfad liegt INNERHALB des Produktions-Repositorys (%s)." % repo)
+    if repo.startswith(target + os.sep):
+        refuse("Das Produktions-Repository liegt INNERHALB des Zielpfads - Ueberschreiben moeglich.")
+
+    # 2. never write over an existing v2.0 installation
+    present = [m for m in PRODUCTION_MARKERS if os.path.exists(os.path.join(target, m))]
+    if present:
+        refuse("Zielpfad enthaelt bereits v2.0-Produktionscode: " + ", ".join(sorted(present)))
+
+    # 3. frozen by default - explicit operator acknowledgement required
+    if LEGACY_OVERRIDE_FLAG not in sys.argv:
+        refuse(
+            "Legacy-Bootstrap ist standardmaessig deaktiviert (fail-closed, Zero-Dummy).",
+            (
+                "Ausnahme nur mit explizitem Operator-Flag:",
+                "    python3 setup_alpha.py " + LEGACY_OVERRIDE_FLAG,
+                "Schreibt dann den historischen v1.6.4-Scaffold nach: " + target,
+            ),
+        )
+
+    print("\u26a0\ufe0f  Legacy-Override aktiv - schreibe v1.6.4-Scaffold nach " + target)
+
+
+_legacy_barrier()
+
 print("=========================================================")
 print(" 🚀 MANAS: CIEL CORE MATRIX — LOCAL SETUP ENGINE v1.6.4")
 print("=========================================================")
@@ -954,19 +1030,7 @@ export class PasskeyWebAuthnClient {
 }
 '''
 
-assert len(files) == 22, f"Expected 23 files, got {len(files)}"
-
-# --- DEPRECATION GUARD (v2.0 rebuild) -------------------------------------
-# This script is the ORIGINAL v1.6.4 skeleton bootstrap. The repository now
-# contains the real execution system (FastAPI backend in app/, DuckDB lake,
-# real Kraken clients). Re-running the skeleton generator would overwrite
-# production code, so it is refused whenever the real backend is present.
-if os.path.exists(os.path.join(TARGET_BASE, "app", "main.py")):
-    print("✋ setup_alpha.py ist veraltet (v1.6.4-Scaffold).")
-    print("   Das Repository enthält bereits das echte Ausführungssystem (v2.0+).")
-    print("   Ausführen würde Produktionscode überschreiben — wurde abgebrochen.")
-    print("   Setup-Anleitung: README.md (Venv, .env, bin/run.sh oder docker-compose).")
-    raise SystemExit(1)
+assert len(files) == 22, f"Expected 22 files, got {len(files)}"
 
 print("\n📝 Schreiben aller Projektdateien auf dein lokales Laufwerk...")
 for rel_path, content in files.items():

@@ -277,7 +277,7 @@ export default function StrategyEditor({
   }, [selectedStrategy, isCreating]);
 
   const handleTriggerEmergencyStop = async () => {
-    if (!confirm("🚨 Send EMERGENCY 'cancel all' signal to Kraken CLI daemon? This will immediately purge open orders and suspend active trading workers.")) {
+    if (!confirm("🚨 Trigger EMERGENCY 'cancel all'? This stops every trading instance and cancels all open orders on Kraken via the signed REST clients (Spot CancelAll + Futures cancelAll). Requires an authenticated passkey session.")) {
       return;
     }
     setIsTriggeringEmergency(true);
@@ -292,15 +292,15 @@ export default function StrategyEditor({
       });
       if (res.ok) {
         const data = await res.json();
-        setEmergencyFeedback(`🚨 Cancel-all signal executed on Kraken CLI daemon! ${data.message || 'Workers halted.'}`);
+        setEmergencyFeedback(`🚨 Cancel-all executed — ${data.stoppedInstances?.length ?? 0} instance(s) stopped.${data.liveErrors?.length ? ' Live-order cancel errors: ' + data.liveErrors.join('; ') : ' Open Kraken orders cancelled.'}`);
         if (onReloadStrategies) await onReloadStrategies();
         setTimeout(() => setEmergencyFeedback(null), 5000);
       } else {
-        setEmergencyFeedback("Failed to dispatch emergency signal to Kraken CLI.");
+        setEmergencyFeedback("Cancel-all rejected by the backend (passkey session required, or request invalid). No orders were cancelled.");
         setTimeout(() => setEmergencyFeedback(null), 4000);
       }
     } catch (err) {
-      setEmergencyFeedback("Error connecting to Kraken CLI emergency endpoint.");
+      setEmergencyFeedback("Backend unreachable — cancel-all could NOT be dispatched. No orders were cancelled.");
       setTimeout(() => setEmergencyFeedback(null), 4000);
     } finally {
       setIsTriggeringEmergency(false);
@@ -952,7 +952,7 @@ if (diff > parameters.threshold) {
                 </div>
 
                 <p className="text-[10px] font-mono text-zinc-500 leading-tight">
-                  Breaching -{hardStopPercent}% drawdown sends an emergency <span className="text-rose-400 font-semibold">cancel all</span> signal to Kraken CLI and halts workers.
+                  Breaching -{hardStopPercent}% drawdown triggers an emergency <span className="text-rose-400 font-semibold">cancel all</span> via the Kraken REST clients and halts every worker.
                 </p>
               </div>
             ) : (
@@ -967,10 +967,10 @@ if (diff > parameters.threshold) {
               onClick={handleTriggerEmergencyStop}
               disabled={isTriggeringEmergency}
               className="w-full bg-rose-950/60 hover:bg-rose-900/70 border border-rose-800/80 hover:border-rose-700 text-rose-300 hover:text-white py-1.5 px-2 rounded text-[11px] font-mono font-medium transition-all flex items-center justify-center space-x-1.5 group"
-              title="Immediately send emergency cancel-all signal to Kraken CLI"
+              title="Stop all instances and cancel every open Kraken order via the signed REST clients"
             >
               <AlertOctagon className="w-3.5 h-3.5 text-rose-400 group-hover:scale-110 transition-transform" />
-              <span>{isTriggeringEmergency ? "Dispatching Signal..." : "🚨 Emergency Cancel All (Kraken CLI)"}</span>
+              <span>{isTriggeringEmergency ? "Cancelling Orders..." : "🚨 Emergency Cancel All (Kraken REST)"}</span>
             </button>
 
             {emergencyFeedback && (

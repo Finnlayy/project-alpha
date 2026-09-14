@@ -35,7 +35,7 @@ from urllib.parse import urlencode
 import httpx
 
 from app.config import KrakenCredentials, Settings
-from app.kraken.spot_client import KrakenError
+from app.kraken.spot_client import KrakenError, decode_api_secret
 
 
 class KrakenFuturesClient:
@@ -69,10 +69,7 @@ class KrakenFuturesClient:
         authent = base64(HMAC-SHA512(base64decode(secret), SHA256(postData + nonce + endpointPath)))
         endpointPath excludes '/derivatives', e.g. '/api/v3/sendorder'.
         """
-        try:
-            secret = base64.b64decode(secret_b64)
-        except Exception as exc:
-            raise KrakenError(f"Futures API secret is not valid base64: {exc}")
+        secret = decode_api_secret(secret_b64, "Futures")
         sha256 = hashlib.sha256(f"{post_data}{nonce}{endpoint_path}".encode("utf-8")).digest()
         mac = hmac.new(secret, sha256, hashlib.sha512)
         return base64.b64encode(mac.digest()).decode("utf-8")

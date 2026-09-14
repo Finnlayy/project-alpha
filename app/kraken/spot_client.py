@@ -17,6 +17,7 @@ raw secret string, or omitting the nonce from the body) yields EAPI:Invalid key.
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import hmac
 import threading
@@ -34,6 +35,44 @@ class KrakenError(RuntimeError):
         super().__init__(error)
         self.http_status = http_status
         self.errors = errors or []
+
+
+def decode_api_secret(secret_b64: str, label: str) -> bytes:
+    """Strictly decode a Kraken API secret into raw HMAC key bytes.
+
+    Kraken stores both Spot and Futures private keys base64-encoded, and both
+    signing schemes require the *decoded* bytes as the HMAC key. Python's
+    ``base64.b64decode`` is deliberately forgiving — it silently discards
+    characters outside the alphabet and, critically, maps ``""`` and
+    whitespace-only strings to ``b""``. Signing with an empty key still yields
+    a well-formed 88-character base64 signature, so a missing or malformed
+    secret would otherwise fail *open*: the request is dispatched and the
+    exchange answers ``EAPI:Invalid key`` with no local indication of the
+    misconfiguration.
+
+    Per the fail-closed rule this decoder raises ``KrakenError`` instead:
+
+    * empty / whitespace-only secret      -> rejected
+    * not strict standard base64          -> rejected
+    * decodes to zero bytes               -> rejected
+
+    Surrounding whitespace is stripped first so that a secret pasted with a
+    trailing newline still works.
+    """
+    if not isinstance(secret_b64, str) or not secret_b64.strip():
+        raise KrakenError(
+            f"Kraken {label} API secret is empty — refusing to sign (fail-closed). "
+            f"Set the corresponding *_PRIVATE_KEY environment variable."
+        )
+    try:
+        key = base64.b64decode(secret_b64.strip(), validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise KrakenError(f"Kraken {label} API secret is not valid base64: {exc}") from exc
+    if not key:
+        raise KrakenError(
+            f"Kraken {label} API secret decodes to zero bytes — refusing to sign (fail-closed)."
+        )
+    return key
 
 
 class KrakenSpotClient:
@@ -70,10 +109,7 @@ class KrakenSpotClient:
           path=/0/private/AddOrder
           → 4/dpxb3iT4tp/ZCVEwSnEsLxx0bqyhLpdfOpc6fn7OR8+UClSV5n9E6aSS8MPtnRfp32bAb0nmbRn6H8ndwLUQ==
         """
-        try:
-            secret = base64.b64decode(secret_b64)
-        except Exception as exc:
-            raise KrakenError(f"Spot API secret is not valid base64: {exc}")
+        secret = decode_api_secret(secret_b64, "Spot")
         sha256 = hashlib.sha256((nonce + post_data).encode("utf-8")).digest()
         mac = hmac.new(secret, api_path.encode("utf-8") + sha256, hashlib.sha512)
         return base64.b64encode(mac.digest()).decode("utf-8")

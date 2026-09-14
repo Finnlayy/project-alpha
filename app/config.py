@@ -91,7 +91,7 @@ class Settings:
     # --- Execution ---
     min_poll_seconds: float = 5.0
     initial_paper_balance_usd: float = 10000.0
-    base_budget_usd: float = 100.0  # per M8 instance, per blueprint example
+    base_budget_usd: float = 100.0  # per M8 instance — confirmed v2.0 default (override with ALPHA_BASE_BUDGET)
     live_order_2fa: bool = True
 
     # --- Telegram (optional notifications / 2FA) ---

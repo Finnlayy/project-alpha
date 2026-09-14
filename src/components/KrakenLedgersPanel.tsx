@@ -246,7 +246,7 @@ export default function KrakenLedgersPanel({
                   <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded border uppercase ${
                     effectiveSpotStatus ? 'bg-emerald-950 text-emerald-300 border-emerald-800' : 'bg-zinc-800 text-zinc-400 border-zinc-700'
                   }`}>
-                    {effectiveSpotStatus ? 'Live Verbunden' : 'Simulierter Modus'}
+                    {effectiveSpotStatus ? '✓ Keys erkannt' : 'Nicht konfiguriert'}
                   </span>
                 </div>
                 <p className="text-[10px] text-zinc-400 mt-0.5">
@@ -482,7 +482,7 @@ export default function KrakenLedgersPanel({
                   <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded border uppercase ${
                     effectiveFuturesStatus ? 'bg-cyan-950 text-cyan-300 border-cyan-800' : 'bg-zinc-800 text-zinc-400 border-zinc-700'
                   }`}>
-                    {effectiveFuturesStatus ? 'Live Verbunden' : 'Simulierter Modus'}
+                    {effectiveFuturesStatus ? '✓ Keys erkannt' : 'Nicht konfiguriert'}
                   </span>
                 </div>
                 <p className="text-[10px] text-zinc-400 mt-0.5">
