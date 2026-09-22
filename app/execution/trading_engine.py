@@ -580,13 +580,23 @@ class TradingEngine:
     def worker_view(self) -> List[Dict[str, Any]]:
         """UI 'worker bots' = real running instances with real PnL."""
         out = []
+        now = time.time()
         for iid, rt in list(self.instances.items()):
             trades = self.lake.trades_for(instance_id=iid, limit=10_000)
-            realized = sum(t["net_pnl"] for t in trades)
+            realized = sum(float(t.get("net_pnl") or 0.0) for t in trades)
+            funding = sum(float(t.get("funding_usd") or 0.0) for t in trades)
             unrealized = 0.0
             if rt.position and rt.last_mark:
                 d = 1 if rt.position["side"] == "long" else -1
                 unrealized = (rt.last_mark - rt.position["entry_price"]) * rt.position["amount"] * d
+            investment = float(rt.spec.get("initial_balance") or rt.state.base_budget_usd or 0.0)
+            total = realized + unrealized
+            roi = (100.0 * total / investment) if investment else 0.0
+            created_ms = float(rt.spec.get("created_at") or 0.0)
+            elapsed = max(0.0, now - (created_ms / 1000.0)) if created_ms else 0.0
+            apr = (roi * (365.0 * 86400.0 / elapsed)) if elapsed > 60 else 0.0
+            params = rt.params or {}
+            status = "active" if (rt.spec.get("status") == "active" and not rt.waiting) else "paused"
             out.append({
                 "id": iid,
                 "name": rt.spec["name"],
@@ -594,18 +604,43 @@ class TradingEngine:
                 "pair": rt.spec["symbol"],
                 "exchange": "Kraken (paper)" if rt.spec["mode"] == "paper" else "Kraken (live)",
                 "mode": rt.spec["mode"],
-                "status": "active" if (rt.spec["status"] == "active" and not rt.waiting) else ("paused" if rt.spec["status"] == "paused" else "waiting"),
+                "status": status,
                 "direction": (rt.position["side"].upper() if rt.position else "FLAT"),
-                "unrealizedPnL": {"value": round(unrealized, 2), "percentage": 0.0},
-                "entryPrice": rt.position["entry_price"] if rt.position else None,
-                "currentPrice": rt.last_mark,
-                "totalProfit": round(realized + unrealized, 2),
+                "leverage": float(params.get("leverage") or 1.0),
+                "unrealizedPnL": {
+                    "value": round(unrealized, 2),
+                    "percentage": round(100.0 * unrealized / investment, 2) if investment else 0.0,
+                },
+                "entryPrice": rt.position["entry_price"] if rt.position else 0.0,
+                "currentPrice": rt.last_mark or 0.0,
+                "totalProfit": round(total, 2),
                 "realizedProfit": round(realized, 2),
+                "roi": round(roi, 2),
+                "apr": round(apr, 1),
                 "openTrades": 1 if rt.position else 0,
                 "closedTrades": len(trades),
                 "m8State": rt.state.status,
                 "lastError": rt.last_error,
                 "lastUpdate": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "genome": rt.params,
+                "spawnedFrom": rt.spec.get("genome_source") or "",
+                "metrics": {
+                    "investment": round(investment, 2),
+                    "currency": "USD",
+                    "realizedProfit": round(realized, 2),
+                    "dcaRangeMin": float(params.get("dca_range_min") or 0.0),
+                    "dcaRangeMax": float(params.get("dca_range_max") or 0.0),
+                    "dcaSteps": int(params.get("dca_steps") or 0),
+                    "dcaOrdersTriggered": 0,
+                    "fundingFees": round(funding, 2),
+                    "liquidationPrice": 0.0,
+                    "liquidationDistancePct": 0.0,
+                },
+                "runtime": {
+                    "days": int(elapsed // 86400),
+                    "hours": int((elapsed % 86400) // 3600),
+                    "minutes": int((elapsed % 3600) // 60),
+                    "cycles": len(trades),
+                },
             })
         return out

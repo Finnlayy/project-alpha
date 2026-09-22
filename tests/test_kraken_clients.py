@@ -2,8 +2,12 @@
 Conformance tests for the Kraken API signing schemes.
 
 We cannot hit the exchange from CI, so we validate against the SPEC:
-  Spot API-2 : base64( post_data + nonce + HMAC-SHA512(api_path + post_data, secret) )
-  Futures v3 : HMAC-SHA256( timestamp + method + path_with_query + body, secret ).hexdigest()
+  Spot API-2 : api_sign = base64( HMAC-SHA512( base64decode(secret),
+                                             api_path + SHA256(nonce + post_data) ) )
+               https://docs.kraken.com/api/docs/guides/spot-rest-auth/
+  Futures    : authent = base64( HMAC-SHA512( base64decode(secret),
+                                             SHA256(post_data + nonce + endpoint_path) ) )
+               https://docs.futures.kraken.com/#http-api-http-api-introduction-authentication
 
 The reference implementations below are written independently from the
 production code and must produce identical signatures.
@@ -18,25 +22,35 @@ from app.kraken.spot_client import KrakenSpotClient
 
 
 # ---------------------------------------------------------------- Spot API-2
-def _reference_spot_sign(api_path: str, post_data: str, secret: str, nonce: str) -> str:
-    sig = hmac.new(secret.encode(), (api_path + post_data).encode(), hashlib.sha512).digest()
-    return base64.b64encode((post_data + nonce + sig.hex()).encode()).decode()
+def _reference_spot_sign(api_path: str, post_data: str, secret_b64: str, nonce: str) -> str:
+    sha256 = hashlib.sha256((nonce + post_data).encode("utf-8")).digest()
+    mac = hmac.new(base64.b64decode(secret_b64), api_path.encode("utf-8") + sha256, hashlib.sha512)
+    return base64.b64encode(mac.digest()).decode("utf-8")
+
+
+def test_spot_signature_matches_official_documented_vector():
+    # Golden vector straight from the Kraken docs (AddOrder example).
+    secret = "kQH5HW/8p1uGOVjbgWA7FunAmGO8lsSUXNsu3eow76sz84Q18fWxnyRzBHCd3pd5nE9qa99HAZtuZuj6F1huXg=="
+    post_data = "nonce=1616492376594&ordertype=limit&pair=XBTUSD&price=37500&type=buy&volume=1.25"
+    got = KrakenSpotClient.sign_request("/0/private/AddOrder", post_data, secret, "1616492376594")
+    assert got == "4/dpxb3iT4tp/ZCVEwSnEsLxx0bqyhLpdfOpc6fn7OR8+UClSV5n9E6aSS8MPtnRfp32bAb0nmbRn6H8ndwLUQ=="
 
 
 def test_spot_signature_matches_spec_reference():
     cases = [
-        ("/0/private/Balance", "asset=XBT", "S3cr3tKey", "1726000000000"),
-        ("/0/private/AddOrder", "pair=XBTUSD&type=buy&ordertype=limit&volume=0.1&price=65000&oflags=post", "x", "1"),
-        ("/0/private/CancelAll", "", "k" * 64, "999"),
+        ("/0/private/Balance", "nonce=1726000000000&asset=XBT",
+         base64.b64encode(b"S3cr3tKey-32-bytes-pad-to-64!!").decode(), "1726000000000"),
+        ("/0/private/AddOrder", "nonce=1&pair=XBTUSD&type=buy&ordertype=limit&volume=0.1&price=65000&oflags=post",
+         base64.b64encode(b"x" * 32).decode(), "1"),
+        ("/0/private/CancelAll", "nonce=999", base64.b64encode(b"k" * 64).decode(), "999"),
     ]
     for path, data, secret, nonce in cases:
         got = KrakenSpotClient.sign_request(path, data, secret, nonce)
         want = _reference_spot_sign(path, data, secret, nonce)
         assert got == want, (path, got, want)
-        # structure: decodable base64, starts with post_data + nonce
+        # structure: 64-byte HMAC-SHA512 digest, base64-encoded
         raw = base64.b64decode(got)
-        assert raw.startswith((data + nonce).encode())
-        assert len(raw) == len(data + nonce) + 128  # sha512 hex
+        assert len(raw) == 64
 
 
 def test_spot_pair_mapping():
@@ -50,28 +64,45 @@ def test_spot_pair_mapping():
         assert KrakenSpotClient.native_to_pair(KrakenSpotClient.pair_to_native(symbol)) == symbol
 
 
-# ---------------------------------------------------------------- Futures v3
-def _reference_futures_sign(ts: str, method: str, path: str, body: str, secret: str) -> str:
-    return hmac.new(secret.encode(), f"{ts}{method.upper()}{path}{body}".encode(), hashlib.sha256).hexdigest()
+# ---------------------------------------------------------------- Futures
+def _reference_futures_sign(post_data: str, nonce: str, endpoint_path: str, secret_b64: str) -> str:
+    sha256 = hashlib.sha256(f"{post_data}{nonce}{endpoint_path}".encode("utf-8")).digest()
+    mac = hmac.new(base64.b64decode(secret_b64), sha256, hashlib.sha512)
+    return base64.b64encode(mac.digest()).decode("utf-8")
+
+
+def _b64_secret(raw: bytes) -> str:
+    return base64.b64encode(raw).decode("utf-8")
 
 
 def test_futures_signature_matches_spec_reference():
     cases = [
-        ("1726000000000", "GET", "/derivatives/api/v3/positions", "", "sec"),
-        ("1726000000000", "POST", "/derivatives/api/v3/order", '{"contract":"XBTUSD-P","side":"buy","size":1}', "s" * 32),
-        ("42", "GET", "/derivatives/api/v3/candles?contract=XBTUSD-P&max=300", "", "another-secret"),
+        ("contract=PF_XBTUSD", "1726000000000", "/api/v3/positions", _b64_secret(b"sec")),
+        ("orderType=mkt&symbol=PF_XBTUSD&side=buy&size=1", "1726000000001",
+         "/api/v3/sendorder", _b64_secret(b"s" * 32)),
+        ("", "42", "/api/v3/tickers", _b64_secret(b"another-secret")),
     ]
-    for ts, method, path, body, secret in cases:
-        got = KrakenFuturesClient.sign_v3(ts, method, path, body, secret)
-        want = _reference_futures_sign(ts, method, path, body, secret)
+    for post_data, nonce, path, secret in cases:
+        got = KrakenFuturesClient.sign_v3(post_data, nonce, path, secret)
+        want = _reference_futures_sign(post_data, nonce, path, secret)
         assert got == want
-        assert len(got) == 64
+        assert len(got) == 88  # base64 of a 64-byte HMAC-SHA512 digest
+
+
+def test_futures_sign_path_excludes_derivatives_prefix():
+    # The on-the-wire path carries /derivatives, the signature must not.
+    assert KrakenFuturesClient.API_PATH == "/derivatives/api/v3"
+    assert KrakenFuturesClient.SIGN_PREFIX == "/api/v3"
 
 
 def test_futures_symbol_mapping():
-    assert KrakenFuturesClient.symbol_to_contract("BTC/USD") == "XBTUSD-P"
-    assert KrakenFuturesClient.symbol_to_contract("ETH/USD") == "ETHUSD-P"
-    assert KrakenFuturesClient.symbol_to_contract("BTC/USD", perpetual=False) == "XBTUSD-M"
+    assert KrakenFuturesClient.symbol_to_contract("BTC/USD") == "PF_XBTUSD"
+    assert KrakenFuturesClient.symbol_to_contract("ETH/USD") == "PF_ETHUSD"
+    assert KrakenFuturesClient.symbol_to_contract("DOGE/USD") == "PF_XDGUSD"
+    # round-trips
+    for symbol in ("BTC/USD", "ETH/USD", "DOGE/USD", "SOL/USD"):
+        assert KrakenFuturesClient.contract_to_symbol(
+            KrakenFuturesClient.symbol_to_contract(symbol)) == symbol
 
 
 def test_client_requires_credentials_for_private():

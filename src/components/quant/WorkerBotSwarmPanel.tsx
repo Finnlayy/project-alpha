@@ -11,7 +11,7 @@ import { WorkerBotData, HistoricalBotSession } from "../../types/trading";
 import { WorkerBotCard } from "../WorkerBotCard";
 import { CloningOriginModal } from "./CloningOriginModal";
 import { StrategyLogicModal } from "./StrategyLogicModal";
-import { safeFetchJson } from "../../lib/api";
+import { safeFetchJson, normalizeWorkerBot } from "../../lib/api";
 
 interface WorkerBotSwarmPanelProps {
   onSelectBot?: (bot: WorkerBotData) => void;
@@ -48,7 +48,7 @@ export const WorkerBotSwarmPanel: React.FC<WorkerBotSwarmPanelProps> = ({
     try {
       const data = await safeFetchJson<{ success: boolean; workers: WorkerBotData[] }>("/api/quant/workers");
       if (data && Array.isArray(data.workers)) {
-        setWorkers(data.workers);
+        setWorkers(data.workers.map((w) => normalizeWorkerBot(w)));
       }
     } catch (err) {
       console.error("Failed to fetch worker bots:", err);
@@ -81,7 +81,7 @@ export const WorkerBotSwarmPanel: React.FC<WorkerBotSwarmPanelProps> = ({
         try {
           const payload = JSON.parse(e.data);
           if (payload.workers && Array.isArray(payload.workers)) {
-            setWorkers(payload.workers);
+            setWorkers(payload.workers.map((w: Record<string, unknown>) => normalizeWorkerBot(w)));
           }
         } catch {
           // ignore malformed frame
@@ -114,7 +114,7 @@ export const WorkerBotSwarmPanel: React.FC<WorkerBotSwarmPanelProps> = ({
         { method: "POST" }
       );
       if (res && res.success) {
-        setWorkers(prev => prev.map(w => (w.id === id ? res.bot : w)));
+        setWorkers(prev => prev.map(w => (w.id === id ? normalizeWorkerBot(res.bot) : w)));
         showNotification("success", res.message);
       }
     } catch (err) {
@@ -140,7 +140,7 @@ export const WorkerBotSwarmPanel: React.FC<WorkerBotSwarmPanelProps> = ({
       );
 
       if (res && res.success) {
-        setWorkers(prev => [res.bot, ...prev.filter(b => b.id !== res.bot.id)]);
+        setWorkers(prev => [normalizeWorkerBot(res.bot), ...prev.filter(b => b.id !== res.bot.id)]);
         showNotification("success", `Autonomous Respawn: Bot '${res.bot.id}' wurde autonom gestartet!`);
         setIsHistoryModalOpen(false);
         setSelectedHistorical(null);
@@ -160,8 +160,8 @@ export const WorkerBotSwarmPanel: React.FC<WorkerBotSwarmPanelProps> = ({
     const target = historical || historySessions[0] || null;
     setSelectedHistorical(target);
     if (target) {
-      setModifierLeverage(target.config.leverage || 3);
-      setModifierInvestment(target.config.investment || 5000);
+      setModifierLeverage(Number(target.config?.leverage) || 3);
+      setModifierInvestment(Number(target.config?.investment) || 5000);
       setModifierCustomName(`${target.name} [Autonomous Klon]`);
     }
     setIsHistoryModalOpen(true);
@@ -182,11 +182,11 @@ export const WorkerBotSwarmPanel: React.FC<WorkerBotSwarmPanelProps> = ({
         sourcePnl: bot.historicalOrigin.sourcePnl ?? (hist?.final_pnl || 3500.0),
         sourceStrategy: bot.historicalOrigin.sourceStrategy || rawCfg.strategy || bot.strategy,
         sourceLeverage: bot.historicalOrigin.sourceLeverage ?? (rawCfg.leverage || bot.leverage),
-        sourceInvestment: bot.historicalOrigin.sourceInvestment ?? (rawCfg.investment || bot.metrics.investment),
+        sourceInvestment: bot.historicalOrigin.sourceInvestment ?? (rawCfg.investment || bot.metrics?.investment || 0),
         configSourceTable: bot.historicalOrigin.configSourceTable || "bot_history (SQLite Lake)",
         cloningRationale: bot.historicalOrigin.cloningRationale || `Orchestrator autonomous cloning decision based on market regime detection.`,
         leverageDelta: bot.historicalOrigin.leverageDelta ?? (bot.leverage - (rawCfg.leverage || bot.leverage)),
-        investmentDelta: bot.historicalOrigin.investmentDelta ?? (bot.metrics.investment - (rawCfg.investment || bot.metrics.investment)),
+        investmentDelta: bot.historicalOrigin.investmentDelta ?? ((bot.metrics?.investment || 0) - (rawCfg.investment || bot.metrics?.investment || 0)),
         dcaStepsSource: rawCfg.dcaSteps || bot.metrics.dcaSteps,
         dcaRangeMinSource: rawCfg.dcaRangeMin || bot.metrics.dcaRangeMin,
         dcaRangeMaxSource: rawCfg.dcaRangeMax || bot.metrics.dcaRangeMax,
@@ -218,11 +218,11 @@ export const WorkerBotSwarmPanel: React.FC<WorkerBotSwarmPanelProps> = ({
           sourcePnl: hist.final_pnl,
           sourceStrategy: rawCfg.strategy || bot.strategy,
           sourceLeverage: rawCfg.leverage || bot.leverage,
-          sourceInvestment: rawCfg.investment || bot.metrics.investment,
+          sourceInvestment: rawCfg.investment || bot.metrics?.investment || 0,
           configSourceTable: "bot_history (SQLite Lake)",
           cloningRationale: `Autonomous orchestrator cloning decision: Matched market regime '${hist.regime}' with historical high-ROI execution session.`,
           leverageDelta: bot.leverage - (rawCfg.leverage || bot.leverage),
-          investmentDelta: bot.metrics.investment - (rawCfg.investment || bot.metrics.investment),
+          investmentDelta: (bot.metrics?.investment || 0) - (rawCfg.investment || bot.metrics?.investment || 0),
           dcaStepsSource: rawCfg.dcaSteps || bot.metrics.dcaSteps,
           dcaRangeMinSource: rawCfg.dcaRangeMin || bot.metrics.dcaRangeMin,
           dcaRangeMaxSource: rawCfg.dcaRangeMax || bot.metrics.dcaRangeMax,
@@ -242,7 +242,7 @@ export const WorkerBotSwarmPanel: React.FC<WorkerBotSwarmPanelProps> = ({
       sourcePnl: bot.totalProfit,
       sourceStrategy: bot.strategy,
       sourceLeverage: bot.leverage,
-      sourceInvestment: bot.metrics.investment,
+      sourceInvestment: bot.metrics?.investment || 0,
       configSourceTable: "bot_history (Genesis Primary Config)",
       cloningRationale: "Direct initial deployment by Quant Orchestrator using engine baseline defaults.",
       leverageDelta: 0,
@@ -257,7 +257,7 @@ export const WorkerBotSwarmPanel: React.FC<WorkerBotSwarmPanelProps> = ({
         strategy: bot.strategy,
         direction: bot.direction,
         leverage: bot.leverage,
-        investment: bot.metrics.investment,
+        investment: bot.metrics?.investment || 0,
         exchange: bot.exchange
       },
       isGenesisRoot: true
@@ -295,10 +295,10 @@ export const WorkerBotSwarmPanel: React.FC<WorkerBotSwarmPanelProps> = ({
     let activeCount = 0;
 
     workers.forEach(w => {
-      totalInvested += w.metrics.investment;
-      totalUnrealized += w.unrealizedPnL.value;
-      totalRealized += w.metrics.realizedProfit;
-      totalProfit += w.totalProfit;
+      totalInvested += Number(w.metrics?.investment) || 0;
+      totalUnrealized += Number(w.unrealizedPnL?.value) || 0;
+      totalRealized += Number(w.metrics?.realizedProfit) || 0;
+      totalProfit += Number(w.totalProfit) || 0;
       if (w.status === "active") activeCount++;
     });
 
@@ -953,8 +953,8 @@ export const WorkerBotSwarmPanel: React.FC<WorkerBotSwarmPanelProps> = ({
                         key={session.id}
                         onClick={() => {
                           setSelectedHistorical(session);
-                          setModifierLeverage(session.config.leverage || 3);
-                          setModifierInvestment(session.config.investment || 5000);
+                          setModifierLeverage(Number(session.config?.leverage) || 3);
+                          setModifierInvestment(Number(session.config?.investment) || 5000);
                           setModifierCustomName(`${session.name} [Autonomous Klon]`);
                         }}
                         className={`p-3 rounded-lg border text-xs cursor-pointer transition-all ${

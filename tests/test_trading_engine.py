@@ -178,6 +178,8 @@ def test_worker_view_reflects_ledger(engine_env):
     assert w["openTrades"] == (1 if engine.instances[iid].position else 0)
     assert w["exchange"] == "Kraken (paper)"
     assert w["m8State"] in ("ACTIVE", "THROTTLED", "QUARANTINED")
+    assert isinstance(w["metrics"]["investment"], (int, float))
+    assert w["metrics"]["currency"] == "USD"
     engine.stop_instance(iid, "TEST_DONE")
 
 

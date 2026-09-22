@@ -467,14 +467,16 @@ export default function MetricsPanel({
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 {activeQueueMatrix.strategies.map((strat) => {
-                  const isStratPositive = strat.totalPnL >= 0;
-                  const isBTC = strat.assetPair.startsWith('BTC') || strat.assetPair.startsWith('XBT');
-                  const isETH = strat.assetPair.startsWith('ETH');
-                  const isSOL = strat.assetPair.startsWith('SOL');
+                  const totalPnL = Number(strat.totalPnL) || 0;
+                  const isStratPositive = totalPnL >= 0;
+                  const pair = strat.assetPair || "BTC/USD";
+                  const isBTC = pair.startsWith('BTC') || pair.startsWith('XBT');
+                  const isETH = pair.startsWith('ETH');
+                  const isSOL = pair.startsWith('SOL');
 
                   return (
                     <button
-                      key={strat.strategyId}
+                      key={strat.strategyId || strat.strategyName}
                       onClick={() => setSelectedModalStrategy({ strategy: strat, queue: selectedQueueTab })}
                       className="text-left bg-zinc-950/80 hover:bg-zinc-950 border border-zinc-800 hover:border-emerald-500/70 p-2.5 rounded-lg transition-all flex items-center justify-between group shadow-sm"
                     >
@@ -485,11 +487,11 @@ export default function MetricsPanel({
                           isSOL ? 'bg-purple-950/60 border-purple-600/70 text-purple-300' :
                           'bg-emerald-950/60 border-emerald-600/70 text-emerald-300'
                         }`}>
-                          {strat.assetPair.split('/')[0]}
+                          {pair.split('/')[0]}
                         </div>
                         <div className="min-w-0">
                           <div className="font-bold text-white text-xs group-hover:text-emerald-400 flex items-center gap-1 transition-colors">
-                            <span>{strat.assetPair}</span>
+                            <span>{pair}</span>
                             <span className="text-[10px] text-zinc-400 font-normal">({formatTimeframe(strat.interval)})</span>
                           </div>
                           <span className="text-[10px] text-zinc-400 truncate block max-w-[120px]">
@@ -500,10 +502,10 @@ export default function MetricsPanel({
 
                       <div className="text-right shrink-0">
                         <span className={`font-bold text-xs block ${isStratPositive ? 'text-emerald-400' : 'text-rose-400'}`}>
-                          {isStratPositive ? '+' : ''}${strat.totalPnL.toFixed(0)}
+                          {isStratPositive ? '+' : ''}${totalPnL.toFixed(0)}
                         </span>
                         <span className="text-[10px] text-zinc-400 block">
-                          {strat.winRate}% win ({strat.totalTrades} cl.)
+                          {Number(strat.winRate) || 0}% win ({Number(strat.totalTrades) || 0} cl.)
                         </span>
                       </div>
                     </button>
