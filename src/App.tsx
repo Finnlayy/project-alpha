@@ -11,7 +11,7 @@ import {
 
 import { TradingStrategy, MarketTicker, ExecutionLog, TradeOrder, RunnerMetrics, StrategyPnL, QueueMatrixData, formatTimeframe, KrakenDualCredentialsStatus } from "./types";
 import { getLedgerCurrency, getCurrencySymbol } from "./lib/symbolNormalizer";
-import { safeFetchJson, DashboardInitResponse, KrakenStatusResponse } from "./lib/api";
+import { safeFetchJson, DashboardInitResponse, KrakenStatusResponse, normalizeQueueMatrix } from "./lib/api";
 import MetricsPanel from "./components/MetricsPanel";
 import TerminalPanel from "./components/TerminalPanel";
 import StrategyEditor from "./components/StrategyEditor";
@@ -126,7 +126,10 @@ export default function App() {
       live: QueueMatrixData;
     }>("/api/queue-matrices");
     if (data) {
-      setQueueMatrices(data);
+      setQueueMatrices({
+        paper: normalizeQueueMatrix(data.paper, "paper"),
+        live: normalizeQueueMatrix(data.live, "live"),
+      });
     }
   };
 

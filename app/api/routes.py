@@ -1009,7 +1009,7 @@ def queue_matrices(request: Request):
             "bestTradeUSD": round(max(net), 2) if net else 0.0,
             "worstTradeUSD": round(min(net), 2) if net else 0.0,
             "activeWorkers": len([i for i in insts if i["status"] == "active"]),
-            "strategies": [_instance_to_strategy_view(i) for i in insts],
+            "strategies": [_strategy_queue_row(i, trades) for i in insts],
             "allTimeTrades": trades[-100:][::-1],
             "pnlTrajectory": [
                 {"tradeIndex": n + 1, "time": t["exit_time"][:16].replace("T", " "), "tradePnL": round(t["net_pnl"], 2), "cumPnL": round(sum(x["net_pnl"] for x in trades[: n + 1]), 2), "pair": t["pair"], "type": t["side"], "strategyName": t["strategy_id"]}
@@ -1019,6 +1019,39 @@ def queue_matrices(request: Request):
         }
 
     return {"paper": matrix("paper"), "live": matrix("live")}
+
+
+def _strategy_queue_row(i: Dict[str, Any], trades: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """StrategyQueueMatrix row: instance identity + per-instance P&L (zeros when no fills)."""
+    mine = [t for t in trades if t.get("instance_id") == i["id"]]
+    net = [float(t.get("net_pnl") or 0.0) for t in mine]
+    wins = [x for x in net if x > 0]
+    losses = [x for x in net if x <= 0]
+    pf = round(sum(wins) / abs(sum(losses)), 2) if losses and sum(losses) != 0 else (999.0 if wins else 0.0)
+    view = _instance_to_strategy_view(i)
+    status = view.get("status") or "inactive"
+    if status in ("archived", "stopped"):
+        status = "inactive"
+    return {
+        **view,
+        "strategyId": i["id"],
+        "strategyName": i["name"],
+        "status": status,
+        "realizedPnL": round(sum(net), 2),
+        "unrealizedPnL": 0.0,
+        "totalPnL": round(sum(net), 2),
+        "totalTrades": len(net),
+        "winningTrades": len(wins),
+        "losingTrades": len(losses),
+        "winRate": round(100.0 * len(wins) / len(net), 1) if net else 0.0,
+        "volumeTradedUSD": round(sum(float(t.get("notional_usd") or 0.0) for t in mine), 2),
+        "profitFactor": pf,
+        "maxDrawdown": 0.0,
+        "avgTradeReturn": round(sum(net) / len(net), 2) if net else 0.0,
+        "bestTrade": round(max(net), 2) if net else 0.0,
+        "worstTrade": round(min(net), 2) if net else 0.0,
+        "trades": mine[-50:][::-1],
+    }
 
 
 def _asset_breakdown(trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1644,7 +1677,8 @@ async def workers_spawn(request: Request):
         genome_source=f"cloned from {hist_id}",
         initial_balance=float(hist.get("initial_balance") or app.settings.base_budget_usd),
     )
-    return {"success": True, "message": f"Instance {row['id']} cloned from {hist_id} and started (paper).", "bot": _instance_to_strategy_view(row)}
+    bot = next((w for w in app.engine.worker_view() if w["id"] == row["id"]), None)
+    return {"success": True, "message": f"Instance {row['id']} cloned from {hist_id} and started (paper).", "bot": bot or _instance_to_strategy_view(row)}
 
 
 @router.get("/api/quant/workers/{bot_id}/spawn-logic")
@@ -1681,7 +1715,8 @@ def workers_toggle(request: Request, bot_id: str):
     row = app.engine.toggle_instance(bot_id)
     if not row:
         raise HTTPException(status_code=404, detail=f"instance '{bot_id}' not found")
-    return {"success": True, "bot": _instance_to_strategy_view(row), "message": f"status -> {row['status']}"}
+    bot = next((w for w in app.engine.worker_view() if w["id"] == bot_id), _instance_to_strategy_view(row))
+    return {"success": True, "bot": bot, "message": f"status -> {row['status']}"}
 
 
 @router.delete("/api/quant/workers/{bot_id}")

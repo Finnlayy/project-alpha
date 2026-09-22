@@ -6,6 +6,7 @@ data/
 venv/
 .env
 .env.*
+!.env.example
 node_modules/
 dist/
 *.parquet

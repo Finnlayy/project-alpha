@@ -246,10 +246,12 @@ export default function QueueMatrixPanel({
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 font-mono">
             {matrix.strategies.map((strat) => {
-              const stratProfit = strat.totalPnL >= 0;
-              const isBTC = strat.assetPair.startsWith('BTC') || strat.assetPair.startsWith('XBT');
-              const isETH = strat.assetPair.startsWith('ETH');
-              const isSOL = strat.assetPair.startsWith('SOL');
+              const totalPnL = Number(strat.totalPnL) || 0;
+              const stratProfit = totalPnL >= 0;
+              const pair = strat.assetPair || "BTC/USD";
+              const isBTC = pair.startsWith('BTC') || pair.startsWith('XBT');
+              const isETH = pair.startsWith('ETH');
+              const isSOL = pair.startsWith('SOL');
 
               return (
                 <button
@@ -269,11 +271,11 @@ export default function QueueMatrixPanel({
                         isSOL ? 'bg-purple-950/60 border-purple-600/70 text-purple-300' :
                         'bg-emerald-950/60 border-emerald-600/70 text-emerald-300'
                       }`}>
-                        {strat.assetPair.split('/')[0]}
+                        {pair.split('/')[0]}
                       </div>
                       <div>
                         <div className="font-bold text-white text-xs group-hover:text-emerald-400 transition-colors flex items-center gap-1">
-                          <span>{strat.assetPair}</span>
+                          <span>{pair}</span>
                           <ArrowUpRight className="w-3 h-3 opacity-0 group-hover:opacity-100 transition-opacity text-emerald-400" />
                         </div>
                         <span className="text-[10px] text-zinc-400 block truncate max-w-[130px]">
@@ -298,7 +300,7 @@ export default function QueueMatrixPanel({
                     <div>
                       <span className="text-[9px] text-zinc-500 block">Net P&amp;L</span>
                       <span className={`text-xs font-bold ${stratProfit ? 'text-emerald-400' : 'text-rose-400'}`}>
-                        {stratProfit ? '+' : ''}${strat.totalPnL.toFixed(0)}
+                        {stratProfit ? '+' : ''}${totalPnL.toFixed(0)}
                       </span>
                     </div>
                     <div>
