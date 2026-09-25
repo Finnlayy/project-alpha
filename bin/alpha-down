@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Stop the complete Projekt:Alpha stack (backend, frontend, MCP).
+# Only targets Alpha processes — will not kill Sigma or other stacks.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+RUNTIME="$ROOT/data/runtime"
+BACKEND_PORT="${BACKEND_PORT:-8000}"
+FRONTEND_PORT="${FRONTEND_PORT:-3000}"
+MCP_PORT="${MCP_PORT:-4100}"
+
+kill_tree() {
+  local pid="$1"
+  [[ -n "$pid" ]] || return 0
+  kill -0 "$pid" 2>/dev/null || return 0
+  local child
+  for child in $(pgrep -P "$pid" 2>/dev/null || true); do
+    kill_tree "$child"
+  done
+  kill "$pid" 2>/dev/null || true
+  sleep 0.2
+  kill -9 "$pid" 2>/dev/null || true
+}
+
+stop_pidfile() {
+  local name="$1" pidfile="$2"
+  if [[ ! -f "$pidfile" ]]; then
+    echo "$name: no pid file"
+    return 0
+  fi
+  local pid
+  pid="$(tr -d '[:space:]' <"$pidfile")"
+  if [[ -z "$pid" ]]; then
+    rm -f "$pidfile"
+    echo "$name: empty pid file"
+    return 0
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
+    kill_tree "$pid"
+    echo "$name stopped (pid $pid)"
+  else
+    echo "$name: pid $pid already gone"
+  fi
+  rm -f "$pidfile"
+}
+
+stop_pidfile "backend"  "$RUNTIME/backend.pid"
+stop_pidfile "frontend" "$RUNTIME/frontend.pid"
+stop_pidfile "mcp"      "$RUNTIME/mcp.pid"
+
+# Fallback: Alpha-specific command lines only (not generic vite/uvicorn).
+pkill -f "uvicorn app.main:app --host 0.0.0.0 --port ${BACKEND_PORT}" 2>/dev/null || true
+pkill -f "vite --host 0.0.0.0 --port ${FRONTEND_PORT}" 2>/dev/null || true
+pkill -f "${ROOT}/mcp-server/src/http-server.ts" 2>/dev/null || true
+
+echo "Projekt:Alpha stack stopped."

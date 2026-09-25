@@ -272,8 +272,11 @@ def test_lake_parquet_roundtrip(lake):
 
 
 def test_lake_summary(lake):
-    lake.upsert_candles("BTC/USD", 15, [{"time": 1, "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1}])
+    lake.upsert_candles("BTC/USD", 15, [{"time": 1_700_000_000, "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1}])
     s = lake.summary()
     assert s["totalCandles"] == 1
     assert s["status"] == "healthy"
     assert s["symbols"][0]["symbol"] == "BTC/USD"
+    assert isinstance(s["symbols"][0]["start_time"], str)
+    assert s["symbols"][0]["start_time"] == "2023-11-14T22:13:20Z"
+    assert s["symbols"][0]["end_time"] == s["symbols"][0]["start_time"]

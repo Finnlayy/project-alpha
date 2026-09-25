@@ -2,7 +2,7 @@
 // Zero-Dummy rule: on network/HTTP failure these helpers return null /
 // {ok:false} with a reason — never fabricated data. Components render explicit
 // offline/empty states when they receive null.
-import { KrakenDualCredentialsStatus, QueueMatrixData, StrategyQueueMatrix } from "../types";
+import { KrakenDualCredentialsStatus, MarketTicker, QueueMatrixData, StrategyQueueMatrix, TradeOrder } from "../types";
 import { WorkerBotData } from "../types/trading";
 
 function asNumber(value: unknown, fallback = 0): number {
@@ -10,8 +10,47 @@ function asNumber(value: unknown, fallback = 0): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
+export function normalizeTradeOrder(raw: unknown): TradeOrder {
+  const row = (raw && typeof raw === "object") ? raw as Record<string, any> : {};
+  const side = String(row.type || row.side || "buy").toLowerCase();
+  const type = side === "sell" || side === "short" ? "sell" : "buy";
+  const price = asNumber(row.price ?? (row.exit_price || row.entry_price));
+  return {
+    id: String(row.id || ""),
+    strategyId: String(row.strategyId || row.instance_id || row.strategy_id || ""),
+    strategyName: String(row.strategyName || row.strategy_id || ""),
+    timestamp: String(row.timestamp || row.exit_time || row.entry_time || row.ts_close || row.ts_open || ""),
+    type,
+    price,
+    amount: asNumber(row.amount),
+    total: asNumber(row.total ?? row.notional_usd),
+    pair: String(row.pair || "BTC/USD"),
+    status: row.status === "pending" ? "pending" : "filled",
+    executionMode: row.executionMode === "live" || row.mode === "live" ? "live" : "paper",
+    pnl: asNumber(row.pnl ?? row.net_pnl),
+  };
+}
+
+export function normalizeTicker(raw: unknown): MarketTicker {
+  const row = (raw && typeof raw === "object") ? raw as Record<string, any> : {};
+  const pair = String(row.pair || row.symbol || "BTC/USD");
+  const price = asNumber(row.price ?? row.lastPrice ?? row.last);
+  return {
+    pair,
+    symbol: row.symbol ? String(row.symbol) : pair,
+    price,
+    lastPrice: asNumber(row.lastPrice ?? price),
+    change24h: asNumber(row.change24h),
+    high: asNumber(row.high),
+    low: asNumber(row.low),
+    volume: asNumber(row.volume),
+    timestamp: String(row.timestamp || ""),
+  };
+}
+
 export function normalizeQueueStrategy(raw: Partial<StrategyQueueMatrix> & Record<string, unknown>): StrategyQueueMatrix {
-  const status = raw.status === "archived" || raw.status === "stopped" ? "inactive" : (raw.status || "inactive");
+  const rawStatus = String(raw.status || "inactive");
+  const status = rawStatus === "archived" || rawStatus === "stopped" ? "inactive" : rawStatus;
   return {
     strategyId: String(raw.strategyId || raw.id || ""),
     strategyName: String(raw.strategyName || raw.name || "Unnamed"),
@@ -33,7 +72,7 @@ export function normalizeQueueStrategy(raw: Partial<StrategyQueueMatrix> & Recor
     avgTradeReturn: asNumber(raw.avgTradeReturn),
     bestTrade: asNumber(raw.bestTrade),
     worstTrade: asNumber(raw.worstTrade),
-    trades: Array.isArray(raw.trades) ? raw.trades : [],
+    trades: Array.isArray(raw.trades) ? raw.trades.map((t) => normalizeTradeOrder(t)) : [],
   };
 }
 
@@ -62,9 +101,20 @@ export function normalizeQueueMatrix(raw: Partial<QueueMatrixData> | null | unde
     worstTradeUSD: asNumber(raw?.worstTradeUSD),
     activeWorkers: asNumber(raw?.activeWorkers),
     strategies,
-    allTimeTrades: Array.isArray(raw?.allTimeTrades) ? raw.allTimeTrades : [],
+    allTimeTrades: Array.isArray(raw?.allTimeTrades) ? raw.allTimeTrades.map((t) => normalizeTradeOrder(t)) : [],
     pnlTrajectory: Array.isArray(raw?.pnlTrajectory) ? raw.pnlTrajectory : [],
-    assetBreakdown: Array.isArray(raw?.assetBreakdown) ? raw.assetBreakdown : [],
+    assetBreakdown: Array.isArray(raw?.assetBreakdown)
+      ? raw.assetBreakdown.map((a) => {
+          const row = a as Record<string, unknown>;
+          return {
+            pair: String(row.pair || ""),
+            volumeUSD: asNumber(row.volumeUSD),
+            tradesCount: asNumber(row.tradesCount),
+            netPnL: asNumber(row.netPnL),
+            winRate: asNumber(row.winRate),
+          };
+        })
+      : [],
   };
 }
 

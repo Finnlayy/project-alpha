@@ -444,7 +444,7 @@ export default function MetricsPanel({
               <div className="bg-zinc-950/70 border border-zinc-850 p-2.5 rounded">
                 <span className="text-[10px] text-zinc-400 block uppercase">Traded Volume</span>
                 <span className="font-bold text-sm text-zinc-200 block mt-0.5">
-                  ${activeQueueMatrix.volumeTradedUSD.toLocaleString()}
+                  ${(Number(activeQueueMatrix.volumeTradedUSD) || 0).toLocaleString()}
                 </span>
                 <span className="text-[9px] text-zinc-400">{activeQueueMatrix.totalAllTrades} orders</span>
               </div>

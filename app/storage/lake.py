@@ -20,6 +20,23 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
+
+def _iso_ts(value: Any) -> Optional[str]:
+    """Serialize DuckDB candle ts (unix seconds, ms, or ISO text) for the dashboard."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if n <= 0:
+        return None
+    if n > 1e12:
+        n = n / 1000.0
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(n)))
+
 import duckdb
 import pyarrow as pa
 
@@ -269,10 +286,17 @@ class DataLake:
             "totalTrades": n_trades,
             "totalInstances": n_instances,
             "symbols": [
-                {"symbol": r[0], "intervalMin": int(r[1]), "rows": int(r[2]), "start_time": r[3], "end_time": r[4]} for r in candle_rows
+                {
+                    "symbol": r[0],
+                    "intervalMin": int(r[1]),
+                    "rows": int(r[2]),
+                    "start_time": _iso_ts(r[3]),
+                    "end_time": _iso_ts(r[4]),
+                }
+                for r in candle_rows
             ],
-            "oldestTimestamp": min((r[3] for r in candle_rows), default=None),
-            "newestTimestamp": max((r[4] for r in candle_rows), default=None),
+            "oldestTimestamp": _iso_ts(min((r[3] for r in candle_rows), default=None)),
+            "newestTimestamp": _iso_ts(max((r[4] for r in candle_rows), default=None)),
             "status": "healthy",
         }
 

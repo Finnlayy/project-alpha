@@ -11,7 +11,7 @@ import {
 
 import { TradingStrategy, MarketTicker, ExecutionLog, TradeOrder, RunnerMetrics, StrategyPnL, QueueMatrixData, formatTimeframe, KrakenDualCredentialsStatus } from "./types";
 import { getLedgerCurrency, getCurrencySymbol } from "./lib/symbolNormalizer";
-import { safeFetchJson, DashboardInitResponse, KrakenStatusResponse, normalizeQueueMatrix } from "./lib/api";
+import { safeFetchJson, DashboardInitResponse, KrakenStatusResponse, normalizeQueueMatrix, normalizeTicker, normalizeTradeOrder } from "./lib/api";
 import MetricsPanel from "./components/MetricsPanel";
 import TerminalPanel from "./components/TerminalPanel";
 import StrategyEditor from "./components/StrategyEditor";
@@ -187,8 +187,8 @@ export default function App() {
 
   const fetchTickers = async () => {
     const data = await safeFetchJson<MarketTicker[]>("/api/market-data");
-    if (data) {
-      setTickers(data);
+    if (data && Array.isArray(data)) {
+      setTickers(data.map((t) => normalizeTicker(t)));
     }
   };
 
@@ -204,7 +204,7 @@ export default function App() {
     if (data) {
       setLogs(data.logs || []);
       setMetrics(data.metrics || null);
-      setOrders(data.orders || []);
+      setOrders(Array.isArray(data.orders) ? data.orders.map((o) => normalizeTradeOrder(o)) : []);
       setBalances(data.balances || null);
       if (data.strategyPnL) {
         setStrategyPnL(data.strategyPnL);
@@ -1374,7 +1374,7 @@ export default function App() {
                           </div>
                           <div className="flex justify-between items-center border-b border-zinc-800 pb-1.5">
                             <span className="text-zinc-400">Volume Traded</span>
-                            <span className="text-white font-medium">${pnl.volumeTradedUSD.toLocaleString()}</span>
+                            <span className="text-white font-medium">${(Number(pnl.volumeTradedUSD) || 0).toLocaleString()}</span>
                           </div>
                           <div className="flex justify-between items-center">
                             <span className="text-zinc-400">Hard Stop Risk</span>

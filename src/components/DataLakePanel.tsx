@@ -39,6 +39,19 @@ interface DataLakePanelProps {
   onSelectSymbol?: (symbol: string) => void;
 }
 
+function formatLakeTime(value: unknown, fallback = "—"): string {
+  if (value == null || value === "") return fallback;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const ms = value > 1e12 ? value : value * 1000;
+    const d = new Date(ms);
+    return Number.isNaN(d.getTime()) ? fallback : d.toISOString().replace("T", " ").slice(0, 19);
+  }
+  if (typeof value === "string") {
+    return value.replace("T", " ").slice(0, 19);
+  }
+  return fallback;
+}
+
 export const DataLakePanel: React.FC<DataLakePanelProps> = ({
   activeSymbol,
   onSelectSymbol
@@ -411,8 +424,8 @@ export const DataLakePanel: React.FC<DataLakePanelProps> = ({
                   {summary.symbols.map((sym: any, idx: number) => {
                     const symbolName = typeof sym === 'string' ? sym : sym?.symbol || 'BTC/USD';
                     const rowsCount = typeof sym === 'object' && typeof sym?.rows === 'number' ? sym.rows : 2130000;
-                    const startTime = typeof sym === 'object' && sym?.start_time ? sym.start_time.substring(0, 19) : '2026-01-01 00:00:00';
-                    const endTime = typeof sym === 'object' && sym?.end_time ? sym.end_time.substring(0, 19) : '2026-09-07 23:00:00';
+                    const startTime = typeof sym === 'object' ? formatLakeTime(sym?.start_time) : '—';
+                    const endTime = typeof sym === 'object' ? formatLakeTime(sym?.end_time) : '—';
                     const avgPrice = typeof sym === 'object' && typeof sym?.avg_price === 'number'
                       ? sym.avg_price
                       : (symbolName.startsWith('BTC') ? 64280 : symbolName.startsWith('ETH') ? 3480 : symbolName.startsWith('SOL') ? 142 : 0.58);
@@ -594,7 +607,10 @@ export const DataLakePanel: React.FC<DataLakePanelProps> = ({
                       dataKey="timestamp"
                       stroke="#71717a"
                       fontSize={9}
-                      tickFormatter={(v) => (v ? v.substring(11, 16) : "")}
+                      tickFormatter={(v) => {
+                        const formatted = formatLakeTime(v, "");
+                        return formatted.length >= 16 ? formatted.slice(11, 16) : formatted;
+                      }}
                     />
                     <YAxis yAxisId="price" stroke="#10b981" fontSize={9} domain={["auto", "auto"]} orientation="right" />
                     <YAxis yAxisId="volume" stroke="#71717a" fontSize={9} domain={[0, "auto"]} hide />
@@ -629,7 +645,7 @@ export const DataLakePanel: React.FC<DataLakePanelProps> = ({
                 {queryResult?.records && queryResult.records.length > 0 ? (
                   queryResult.records.map((r: any, i: number) => (
                     <tr key={i} className="hover:bg-zinc-850/50">
-                      <td className="p-2 text-zinc-300">{r.timestamp?.substring(0, 19)}</td>
+                      <td className="p-2 text-zinc-300">{formatLakeTime(r.timestamp)}</td>
                       <td className="p-2 font-bold text-emerald-400">{r.symbol}</td>
                       <td className="p-2 text-zinc-300">{r.open?.toFixed(2)}</td>
                       <td className="p-2 text-emerald-300">{r.high?.toFixed(2)}</td>

@@ -39,6 +39,43 @@ def _app(request: Request) -> AppState:
     return request.app.state.alpha
 
 
+def _trade_to_ui_order(t: Dict[str, Any]) -> Dict[str, Any]:
+    """Lake trade row -> TradeOrder fields the dashboard formats (price/total/type)."""
+    side = str(t.get("type") or t.get("side") or "buy").lower()
+    if side in ("long", "buy"):
+        typ = "buy"
+    elif side in ("short", "sell"):
+        typ = "sell"
+    else:
+        typ = "buy"
+    price = t.get("price")
+    if price in (None, ""):
+        exit_px = t.get("exit_price")
+        price = exit_px if exit_px not in (None, "", 0, 0.0) else t.get("entry_price")
+    total = t.get("total")
+    if total in (None, ""):
+        total = t.get("notional_usd")
+    ts = t.get("timestamp") or t.get("exit_time") or t.get("entry_time") or t.get("ts_close") or t.get("ts_open")
+    try:
+        pnl = float(t["pnl"]) if t.get("pnl") is not None else float(t.get("net_pnl") or 0.0)
+    except (TypeError, ValueError):
+        pnl = 0.0
+    return {
+        "id": t.get("id"),
+        "strategyId": t.get("strategyId") or t.get("instance_id") or t.get("strategy_id") or "",
+        "strategyName": t.get("strategyName") or t.get("strategy_id") or "",
+        "timestamp": ts or "",
+        "type": typ,
+        "price": float(price or 0.0),
+        "amount": float(t.get("amount") or 0.0),
+        "total": float(total or 0.0),
+        "pair": t.get("pair") or "BTC/USD",
+        "status": t.get("status") or "filled",
+        "executionMode": t.get("executionMode") or t.get("mode") or "paper",
+        "pnl": pnl,
+    }
+
+
 def _require_session(request: Request) -> Dict[str, Any]:
     token = request.headers.get("X-Alpha-Session") or request.query_params.get("token")
     payload = _app(request).sessions.verify(token)
@@ -938,7 +975,7 @@ def logs(request: Request):
             "activeLedgerMode": app.settings.execution_mode,
             "hasCredentials": _credentials_status(app)["hasCredentials"],
         },
-        "orders": app.lake.trades_for(limit=100)[::-1],
+        "orders": [_trade_to_ui_order(t) for t in app.lake.trades_for(limit=100)[::-1]],
         "balances": {},
         "strategyPnL": _strategy_pnl(app),
     }
@@ -1010,7 +1047,7 @@ def queue_matrices(request: Request):
             "worstTradeUSD": round(min(net), 2) if net else 0.0,
             "activeWorkers": len([i for i in insts if i["status"] == "active"]),
             "strategies": [_strategy_queue_row(i, trades) for i in insts],
-            "allTimeTrades": trades[-100:][::-1],
+            "allTimeTrades": [_trade_to_ui_order(t) for t in trades[-100:][::-1]],
             "pnlTrajectory": [
                 {"tradeIndex": n + 1, "time": t["exit_time"][:16].replace("T", " "), "tradePnL": round(t["net_pnl"], 2), "cumPnL": round(sum(x["net_pnl"] for x in trades[: n + 1]), 2), "pair": t["pair"], "type": t["side"], "strategyName": t["strategy_id"]}
                 for n, t in enumerate(trades[-200:])
@@ -1050,7 +1087,7 @@ def _strategy_queue_row(i: Dict[str, Any], trades: List[Dict[str, Any]]) -> Dict
         "avgTradeReturn": round(sum(net) / len(net), 2) if net else 0.0,
         "bestTrade": round(max(net), 2) if net else 0.0,
         "worstTrade": round(min(net), 2) if net else 0.0,
-        "trades": mine[-50:][::-1],
+        "trades": [_trade_to_ui_order(t) for t in mine[-50:][::-1]],
     }
 
 

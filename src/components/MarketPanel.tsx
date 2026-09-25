@@ -448,7 +448,7 @@ export default function MarketPanel({ tickers, orders, portfolioHistory, onReset
 
                 <div className="mt-1">
                   <span className="text-xs font-mono font-bold text-white tracking-tight">
-                    ${ticker.price.toLocaleString(undefined, { 
+                    ${(Number(ticker.price ?? ticker.lastPrice) || 0).toLocaleString(undefined, { 
                       minimumFractionDigits: ticker.pair.includes('XRP') ? 4 : 2,
                       maximumFractionDigits: ticker.pair.includes('XRP') ? 4 : 2
                     })}
@@ -896,7 +896,7 @@ export default function MarketPanel({ tickers, orders, portfolioHistory, onReset
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
                   <div>
                     <span className="text-zinc-500 block text-[9px] uppercase">Execution Price</span>
-                    <span className="font-bold text-white">${activeSelectedOrder.price.toLocaleString()}</span>
+                    <span className="font-bold text-white">${(Number(activeSelectedOrder.price) || 0).toLocaleString()}</span>
                   </div>
                   <div>
                     <span className="text-zinc-500 block text-[9px] uppercase">Order Amount</span>
@@ -904,7 +904,7 @@ export default function MarketPanel({ tickers, orders, portfolioHistory, onReset
                   </div>
                   <div>
                     <span className="text-zinc-500 block text-[9px] uppercase">USD Volume</span>
-                    <span className="font-bold text-emerald-400">${activeSelectedOrder.total.toLocaleString()}</span>
+                    <span className="font-bold text-emerald-400">${(Number(activeSelectedOrder.total) || 0).toLocaleString()}</span>
                   </div>
                   <div>
                     <span className="text-zinc-500 block text-[9px] uppercase">Strategy</span>
@@ -1033,12 +1033,12 @@ export default function MarketPanel({ tickers, orders, portfolioHistory, onReset
 
                   <div className="flex justify-between items-baseline">
                     <span className="text-zinc-300 font-semibold">{order.amount} {order.pair.split('/')[0]}</span>
-                    <span className="text-zinc-400">@ ${order.price.toLocaleString()}</span>
+                    <span className="text-zinc-400">@ ${(Number(order.price) || 0).toLocaleString()}</span>
                   </div>
 
                   <div className="flex justify-between items-center text-[10px] text-zinc-500 mt-1 border-t border-zinc-900/90 pt-1">
                     <span className="truncate max-w-[180px]">{order.strategyName}</span>
-                    <span className="text-zinc-400 font-medium">${order.total.toLocaleString()} USD</span>
+                    <span className="text-zinc-400 font-medium">${(Number(order.total) || 0).toLocaleString()} USD</span>
                   </div>
                 </div>
               );

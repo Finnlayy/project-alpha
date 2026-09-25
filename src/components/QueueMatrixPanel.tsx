@@ -219,7 +219,7 @@ export default function QueueMatrixPanel({
           <div className="bg-zinc-900/80 border border-zinc-800 p-3.5 rounded-xl">
             <span className="text-[10px] text-zinc-500 uppercase tracking-wider block">Volume Traded</span>
             <div className="text-xl font-bold text-zinc-200 mt-1">
-              ${matrix.volumeTradedUSD.toLocaleString()}
+              ${(Number(matrix.volumeTradedUSD) || 0).toLocaleString()}
             </div>
             <span className="text-[10px] text-zinc-500">
               {matrix.totalAllTrades} total orders
@@ -413,7 +413,7 @@ export default function QueueMatrixPanel({
                       </span>
                     </div>
                     <div className="flex items-center justify-between text-[10px] text-zinc-500">
-                      <span>Volume: ${asset.volumeUSD.toLocaleString()}</span>
+                      <span>Volume: ${(Number(asset.volumeUSD) || 0).toLocaleString()}</span>
                       <span>Win: {asset.winRate}% ({asset.tradesCount} orders)</span>
                     </div>
                   </div>
@@ -517,8 +517,8 @@ export default function QueueMatrixPanel({
                               {t.type}
                             </span>
                           </td>
-                          <td className="py-2 px-3 text-zinc-200">${t.price.toLocaleString()}</td>
-                          <td className="py-2 px-3 text-zinc-300">${t.total.toLocaleString()}</td>
+                          <td className="py-2 px-3 text-zinc-200">${(Number(t.price) || 0).toLocaleString()}</td>
+                          <td className="py-2 px-3 text-zinc-300">${(Number(t.total) || 0).toLocaleString()}</td>
                           <td className="py-2 px-3 text-right">
                             {hasPnl ? (
                               <span className={`font-bold ${isWin ? 'text-emerald-400' : 'text-rose-400'}`}>

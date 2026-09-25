@@ -218,7 +218,7 @@ export default function StrategyMatrixModal({
                   <div className="bg-zinc-950/60 border border-zinc-800 p-3 rounded-lg">
                     <span className="text-[10px] text-zinc-500 uppercase tracking-wider block">Traded Volume</span>
                     <div className="text-lg font-bold text-zinc-200 mt-1">
-                      ${strategyMatrix.volumeTradedUSD.toLocaleString()}
+                      ${(Number(strategyMatrix.volumeTradedUSD) || 0).toLocaleString()}
                     </div>
                     <span className="text-[10px] text-zinc-500">
                       Avg Trade: ${strategyMatrix.avgTradeReturn.toFixed(2)}
@@ -457,9 +457,9 @@ export default function StrategyMatrixModal({
                                     {t.type}
                                   </span>
                                 </td>
-                                <td className="py-2 px-3 text-zinc-200">${t.price.toLocaleString()}</td>
+                                <td className="py-2 px-3 text-zinc-200">${(Number(t.price) || 0).toLocaleString()}</td>
                                 <td className="py-2 px-3 text-zinc-300">{t.amount}</td>
-                                <td className="py-2 px-3 text-zinc-300">${t.total.toLocaleString()}</td>
+                                <td className="py-2 px-3 text-zinc-300">${(Number(t.total) || 0).toLocaleString()}</td>
                                 <td className="py-2 px-3 text-right">
                                   {hasPnl ? (
                                     <span className={`font-bold ${isWin ? 'text-emerald-400' : 'text-rose-400'}`}>

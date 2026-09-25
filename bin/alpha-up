@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# Start the complete Projekt:Alpha stack:
+#   backend  FastAPI / uvicorn  :8000
+#   frontend Vite dashboard     :3000  (proxies /api -> :8000)
+#   mcp      Streamable HTTP    :4100
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+RUNTIME="$ROOT/data/runtime"
+mkdir -p "$RUNTIME"
+
+BACKEND_PORT="${BACKEND_PORT:-8000}"
+FRONTEND_PORT="${FRONTEND_PORT:-3000}"
+MCP_PORT="${MCP_PORT:-4100}"
+VENV_PY="$ROOT/.venv/bin/python"
+
+port_busy() {
+  ss -ltn "sport = :$1" 2>/dev/null | grep -q LISTEN
+}
+
+pid_alive() {
+  [[ -f "$1" ]] && kill -0 "$(cat "$1")" 2>/dev/null
+}
+
+fail() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+if [[ ! -x "$VENV_PY" ]]; then
+  fail "Missing .venv — create it with: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
+fi
+if [[ ! -x "$ROOT/node_modules/.bin/vite" ]]; then
+  echo "Installing frontend dependencies ..."
+  npm install
+fi
+if [[ ! -x "$ROOT/mcp-server/node_modules/.bin/tsx" ]]; then
+  echo "Installing MCP server dependencies ..."
+  (cd "$ROOT/mcp-server" && npm install)
+fi
+
+busy=()
+port_busy "$BACKEND_PORT" && busy+=("backend :$BACKEND_PORT")
+port_busy "$FRONTEND_PORT" && busy+=("frontend :$FRONTEND_PORT")
+port_busy "$MCP_PORT" && busy+=("mcp :$MCP_PORT")
+if ((${#busy[@]})); then
+  echo "These Alpha ports are already in use: ${busy[*]}"
+  echo "If this is Alpha, it is already running. If not, stop the other process or run: $ROOT/bin/alpha-down"
+  if pid_alive "$RUNTIME/backend.pid" || pid_alive "$RUNTIME/frontend.pid" || pid_alive "$RUNTIME/mcp.pid"; then
+    echo "Recorded Alpha PIDs are still alive — treating as already up."
+    exit 0
+  fi
+  fail "refusing to start while ports are occupied by another process"
+fi
+
+start_one() {
+  local name="$1" pidfile="$2" logfile="$3"
+  shift 3
+  echo "Starting $name ..."
+  nohup "$@" >"$logfile" 2>&1 &
+  echo $! >"$pidfile"
+}
+
+start_one "backend  http://127.0.0.1:${BACKEND_PORT}" \
+  "$RUNTIME/backend.pid" "$RUNTIME/backend.log" \
+  "$VENV_PY" -m uvicorn app.main:app --host 0.0.0.0 --port "$BACKEND_PORT"
+
+start_one "frontend http://127.0.0.1:${FRONTEND_PORT}" \
+  "$RUNTIME/frontend.pid" "$RUNTIME/frontend.log" \
+  "$ROOT/node_modules/.bin/vite" --host 0.0.0.0 --port "$FRONTEND_PORT"
+
+start_one "mcp      http://127.0.0.1:${MCP_PORT}/mcp" \
+  "$RUNTIME/mcp.pid" "$RUNTIME/mcp.log" \
+  env MCP_PORT="$MCP_PORT" ALPHA_BACKEND_URL="http://127.0.0.1:${BACKEND_PORT}" \
+    "$ROOT/mcp-server/node_modules/.bin/tsx" "$ROOT/mcp-server/src/http-server.ts"
+
+wait_http() {
+  local url="$1" label="$2"
+  local i
+  for i in $(seq 1 40); do
+    if curl -sf --max-time 1 "$url" >/dev/null 2>&1; then
+      echo "$label ready"
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "WARNING: $label did not become ready. See $RUNTIME/${label}.log" >&2
+  return 1
+}
+
+wait_port() {
+  local port="$1" label="$2"
+  local i
+  for i in $(seq 1 40); do
+    if port_busy "$port"; then
+      echo "$label listening on :$port"
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "WARNING: $label did not bind :$port. See $RUNTIME/${label}.log" >&2
+  return 1
+}
+
+ok=0
+wait_http "http://127.0.0.1:${BACKEND_PORT}/api/health" backend && ok=$((ok + 1))
+wait_port "$FRONTEND_PORT" frontend && ok=$((ok + 1))
+wait_port "$MCP_PORT" mcp && ok=$((ok + 1))
+
+echo
+echo "Projekt:Alpha stack"
+echo "  dashboard  http://127.0.0.1:${FRONTEND_PORT}"
+echo "  api        http://127.0.0.1:${BACKEND_PORT}/api/health"
+echo "  mcp        http://127.0.0.1:${MCP_PORT}/mcp"
+echo "  logs       $RUNTIME"
+echo "  stop       $ROOT/bin/alpha-down"
+
+if command -v xdg-open >/dev/null 2>&1; then
+  xdg-open "http://127.0.0.1:${FRONTEND_PORT}" >/dev/null 2>&1 || true
+fi
+
+if ((ok < 3)); then
+  exit 1
+fi
