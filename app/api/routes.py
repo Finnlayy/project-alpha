@@ -27,6 +27,7 @@ from app.quant.hurst import hurst_dfa, hurst_regime
 from app.quant.lead_lag import cross_impact
 from app.quant.regime import classify_regime
 from app.quant.sentiment import sentiment_from_market_data
+from app.strategies.cross_book_kraken_spot_pro_paper import CrossBookStateError, LiveCreateRefused
 from app.strategies.registry import REGISTRY, describe_strategy_code, get_strategy
 
 router = APIRouter()
@@ -845,15 +846,41 @@ async def strategies_create(request: Request):
     strategy_type = body.get("strategyType") or body.get("strategy_type") or body.get("strategy") or "EMA_TREND_RSI"
     if strategy_type not in REGISTRY:
         raise HTTPException(status_code=422, detail=f"unknown strategyType '{strategy_type}'. Known: {sorted(REGISTRY)}")
-    symbol = body.get("assetPair") or body.get("pair") or "BTC/USD"
-    row = app.engine.start_instance(
-        strategy_type=strategy_type,
-        name=body.get("name") or f"{strategy_type} on {symbol}",
-        symbol=symbol,
-        interval_min=int(body.get("interval") or app.settings.default_interval),
-        params=body.get("parameters") or body.get("params") or {},
-        mode="paper" if body.get("executionMode") in (None, "paper") else "paper",  # UI creation always starts paper
-    )
+    strategy = get_strategy(strategy_type)
+    raw_mode = body.get("executionMode", body.get("mode", None))
+    if raw_mode is None or raw_mode == "":
+        requested = "paper"
+    else:
+        requested = str(raw_mode).strip().lower()
+    explicit_symbol = body.get("assetPair") or body.get("pair") or body.get("symbol")
+    if getattr(strategy, "paper_only", False):
+        if requested != "paper":
+            raise HTTPException(
+                status_code=422,
+                detail="CROSS_BOOK_KRAKEN_SPOT_PRO_PAPER refuses live create",
+            )
+        if not explicit_symbol:
+            raise HTTPException(status_code=422, detail="symbol parameter is required")
+        symbol = explicit_symbol
+        mode = "paper"
+    else:
+        symbol = explicit_symbol or "BTC/USD"
+        mode = "paper"  # UI creation always starts paper
+    try:
+        row = app.engine.start_instance(
+            strategy_type=strategy_type,
+            name=body.get("name") or f"{strategy_type} on {symbol}",
+            symbol=symbol,
+            interval_min=int(body.get("interval") or app.settings.default_interval),
+            params=body.get("parameters") or body.get("params") or {},
+            mode=mode,
+        )
+    except LiveCreateRefused as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except CrossBookStateError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     return _instance_to_strategy_view(row)
 
 
@@ -872,6 +899,8 @@ async def strategies_update(request: Request, sid: str):
     if body.get("executionMode") in ("paper", "live") and body["executionMode"] != row.get("mode"):
         # Queue switch only while the worker is NOT running (mode is load-bearing
         # for sizing/fees/live routing — hot-switching would corrupt PnL).
+        if body["executionMode"] == "live" and getattr(get_strategy(row["strategy_type"]), "paper_only", False):
+            raise HTTPException(status_code=422, detail="CROSS_BOOK_KRAKEN_SPOT_PRO_PAPER refuses live create")
         if row.get("status") == "active":
             raise HTTPException(status_code=409, detail="stop the instance before switching execution queues (paper<->live)")
         row["mode"] = body["executionMode"]
