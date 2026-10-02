@@ -65,7 +65,25 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE TABLE IF NOT EXISTS paper_accounts (
     mode VARCHAR PRIMARY KEY, balance_usd DOUBLE, updated_at BIGINT
 );
+CREATE TABLE IF NOT EXISTS effect_dedup (
+    effect_hash VARCHAR PRIMARY KEY,
+    instance_id VARCHAR,
+    symbol VARCHAR,
+    action VARCHAR,
+    payload_json VARCHAR,
+    created_at BIGINT
+);
 """
+
+
+def _decode_effect_payload(payload_json: str) -> Dict[str, Any]:
+    try:
+        payload = json.loads(payload_json)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("corrupt cross-book effect payload") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("corrupt cross-book effect payload")
+    return payload
 
 
 class DataLake:
@@ -242,6 +260,74 @@ class DataLake:
         with self._lock:
             row = self._conn.execute("SELECT balance_usd FROM paper_accounts WHERE mode=?", [mode]).fetchone()
         return float(row[0]) if row else None
+
+    # ----------------------------------------------------------- effect dedup
+    def effect_exists(self, effect_hash: str) -> bool:
+        with self._lock:
+            return self._effect_exists_locked(effect_hash)
+
+    def _effect_exists_locked(self, effect_hash: str) -> bool:
+        row = self._conn.execute("SELECT 1 FROM effect_dedup WHERE effect_hash=?", [effect_hash]).fetchone()
+        return row is not None
+
+    def claim_effect(self, effect_hash: str, instance_id: str, symbol: str, action: str, payload_json: str) -> bool:
+        """Insert the effect once. False means this exact effect was already claimed."""
+        with self._lock:
+            if self._effect_exists_locked(effect_hash):
+                return False
+            self._conn.execute(
+                "INSERT INTO effect_dedup VALUES (?,?,?,?,?,?)",
+                [effect_hash, instance_id, symbol, action, payload_json, int(time.time() * 1000)],
+            )
+            return True
+
+    def commit_cross_flatten(self, effect_hash: str, instance_id: str, symbol: str, payload_json: str, trade: Dict[str, Any]) -> bool:
+        """Persist the flatten trade and its effect together. False if the effect was already claimed."""
+        with self._lock:
+            if self._effect_exists_locked(effect_hash):
+                return False
+            self.add_trade(trade)
+            self._conn.execute(
+                "INSERT INTO effect_dedup VALUES (?,?,?,?,?,?)",
+                [effect_hash, instance_id, symbol, "flatten", payload_json, int(time.time() * 1000)],
+            )
+            return True
+
+    def unflattened_cross_open(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """The single open cross effect for a symbol that has no flatten, or None."""
+        with self._lock:
+            opens = self._conn.execute(
+                """SELECT effect_hash, instance_id, payload_json, created_at
+                   FROM effect_dedup WHERE symbol=? AND action='open' ORDER BY created_at ASC""",
+                [symbol],
+            ).fetchall()
+            flats = self._conn.execute(
+                "SELECT payload_json FROM effect_dedup WHERE symbol=? AND action='flatten'",
+                [symbol],
+            ).fetchall()
+        flattened = set()
+        for (payload_json,) in flats:
+            payload = _decode_effect_payload(payload_json)
+            opened = payload.get("opens_effect_hash")
+            if isinstance(opened, str) and opened:
+                flattened.add(opened)
+        live = []
+        for effect_hash, instance_id, payload_json, created_at in opens:
+            if effect_hash in flattened:
+                continue
+            live.append(
+                {
+                    "effect_hash": effect_hash,
+                    "instance_id": instance_id,
+                    "payload": _decode_effect_payload(payload_json),
+                    "created_at": int(created_at or 0),
+                }
+            )
+        if len(live) > 1:
+            raise RuntimeError(f"multiple unflattened paper crosses for {symbol}; entry refused")
+        if not live:
+            return None
+        return live[0]
 
     # ------------------------------------------------------------------ summary
     def summary(self) -> Dict[str, Any]:
