@@ -1,3 +1,11 @@
+/**
+ * Paper-only genetic optimizer panel.
+ * The panel asks for more than 600 candles.
+ * A route refusal stays visible.
+ * While a run is in flight the panel shows that it is running, not a generation number.
+ * Generation, genome count, and rows come only from the response.
+ * If there is no result yet, the panel does not show Generation 50 or 30 Genomes.
+ */
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -19,6 +27,168 @@ import {
   TradingStrategy,
   GeneticChromosome 
 } from "../types";
+
+function refusalDetail(payload: unknown): string {
+  if (payload === null || typeof payload !== "object" || !("detail" in payload)) {
+    return "";
+  }
+  const detail = (payload as { detail: unknown }).detail;
+  if (typeof detail === "string") {
+    return detail;
+  }
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => (typeof item === "string" ? item : JSON.stringify(item)))
+      .join("; ");
+  }
+  if (detail === null || detail === undefined) {
+    return "";
+  }
+  return JSON.stringify(detail);
+}
+
+async function readRouteRefusal(res: Response): Promise<string> {
+  let payload: unknown = null;
+  try {
+    payload = await res.json();
+  } catch {
+    payload = null;
+  }
+  const detail = refusalDetail(payload);
+  if (detail.length > 0) {
+    return `Route refused the run (${res.status}): ${detail}`;
+  }
+  return `Route refused the run (${res.status})`;
+}
+
+function finiteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function showFixed(value: unknown, digits: number): string {
+  const n = finiteNumber(value);
+  return n === null ? "—" : n.toFixed(digits);
+}
+
+function showSignedPercent(value: unknown): string {
+  const n = finiteNumber(value);
+  if (n === null) {
+    return "—";
+  }
+  return `${n >= 0 ? "+" : ""}${n}%`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function resultField(result: GeneticOptimizationResult, key: string): unknown {
+  return (result as unknown as Record<string, unknown>)[key];
+}
+
+function populationRows(result: GeneticOptimizationResult): GeneticIndividual[] | null {
+  const population = resultField(result, "population");
+  if (!Array.isArray(population)) {
+    return null;
+  }
+  return population.filter((row): row is GeneticIndividual => isRecord(row));
+}
+
+function completedGenerations(result: GeneticOptimizationResult): number | null {
+  return finiteNumber(resultField(result, "totalGenerationsCompleted"))
+    ?? finiteNumber(resultField(result, "generations"));
+}
+
+function historyPoints(result: GeneticOptimizationResult): GenerationHistoryPoint[] {
+  const history = resultField(result, "history");
+  const generationHistory = resultField(result, "generationHistory");
+  const points = Array.isArray(history) ? history : Array.isArray(generationHistory) ? generationHistory : null;
+  if (!points) {
+    return [];
+  }
+  return points.filter((point): point is GenerationHistoryPoint => {
+    return isRecord(point) && finiteNumber(point.generation) !== null;
+  });
+}
+
+function eliteCount(result: GeneticOptimizationResult): number | null {
+  const explicit = finiteNumber(resultField(result, "survivorCount"));
+  if (explicit !== null) {
+    return explicit;
+  }
+  const survivors = resultField(result, "survivors");
+  if (Array.isArray(survivors)) {
+    return survivors.length;
+  }
+  const topSurvivors = resultField(result, "topSurvivors");
+  if (Array.isArray(topSurvivors)) {
+    return topSurvivors.length;
+  }
+  return null;
+}
+
+function responseCandleCount(result: GeneticOptimizationResult, primary: string, alternate: string): number | null {
+  return finiteNumber(resultField(result, primary)) ?? finiteNumber(resultField(result, alternate));
+}
+
+function nestedNumber(source: unknown, parent: string, key: string): number | null {
+  if (!isRecord(source)) {
+    return null;
+  }
+  const child = source[parent];
+  if (!isRecord(child)) {
+    return null;
+  }
+  return finiteNumber(child[key]);
+}
+
+function isInspectable(value: unknown): value is GeneticIndividual {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return typeof value.id === "string"
+    && isRecord(value.genes)
+    && isRecord(value.inSampleSummary)
+    && isRecord(value.outOfSampleSummary);
+}
+
+function RunStatusNotice({
+  isRunning,
+  refusal,
+}: {
+  isRunning: boolean;
+  refusal: string | null;
+}) {
+  if (isRunning) {
+    return (
+      <div
+        role="status"
+        data-testid="genetic-run-status"
+        className="bg-zinc-900 border border-zinc-800 rounded-xl p-8 text-center text-purple-300 font-mono text-xs"
+      >
+        Running
+      </div>
+    );
+  }
+  if (refusal) {
+    return (
+      <div
+        role="alert"
+        className="bg-rose-950/70 border border-rose-800/80 rounded-xl p-8 text-center text-rose-300 font-mono text-xs"
+      >
+        {refusal}
+      </div>
+    );
+  }
+  return (
+    <div
+      data-testid="genetic-run-empty"
+      className="bg-zinc-900 border border-zinc-800 rounded-xl p-8 text-center text-zinc-500 font-mono text-xs"
+    >
+      No result yet.
+    </div>
+  );
+}
 
 interface GeneticOptimizerPanelProps {
   strategies: TradingStrategy[];
@@ -43,7 +213,7 @@ export function GeneticOptimizerPanel({
     walkForwardSplitPercent: 70, // 70% In-Sample / 30% Out-of-Sample
     assetPair: "BTC/USD",
     interval: 15,
-    candleCount: 500,
+    candleCount: 2400,
     initialBalance: 10000,
     feePercent: 0.26,
     slippagePercent: 0.05
@@ -51,8 +221,6 @@ export function GeneticOptimizerPanel({
 
   // Optimizer Execution State
   const [isRunning, setIsRunning] = useState(false);
-  const [progressGen, setProgressGen] = useState(0);
-  const [progressPercent, setProgressPercent] = useState(0);
   const [optimizationResult, setOptimizationResult] = useState<GeneticOptimizationResult | null>(null);
   const [selectedIndividual, setSelectedIndividual] = useState<GeneticIndividual | null>(null);
   const [selectedFilterTab, setSelectedFilterTab] = useState<'all' | 'atr' | 'volume' | 'trend' | 'fvg' | 'cisd' | 'mtf'>('all');
@@ -63,6 +231,7 @@ export function GeneticOptimizerPanel({
   // Deployment UI feedback state
   const [deploying, setDeploying] = useState(false);
   const [deploySuccess, setDeploySuccess] = useState<string | null>(null);
+  const [runRefusal, setRunRefusal] = useState<string | null>(null);
   const [copiedCode, setCopiedCode] = useState(false);
 
   // Find active baseline strategy object if one is selected
@@ -111,30 +280,27 @@ export function GeneticOptimizerPanel({
 
   // Update selected individual when result changes
   useEffect(() => {
-    if (optimizationResult && optimizationResult.population.length > 0) {
-      if (!selectedIndividual || !optimizationResult.population.some(p => p.id === selectedIndividual.id)) {
-        setSelectedIndividual(optimizationResult.bestIndividual || optimizationResult.population[0]);
-      }
+    if (!optimizationResult) {
+      return;
     }
-  }, [optimizationResult]);
+    const rows = populationRows(optimizationResult) ?? [];
+    const best = isInspectable(resultField(optimizationResult, "bestIndividual"))
+      ? resultField(optimizationResult, "bestIndividual") as GeneticIndividual
+      : null;
+    const stillVisible = selectedIndividual !== null && rows.some((row) => row.id === selectedIndividual.id);
+    if (stillVisible) {
+      return;
+    }
+    const firstInspectable = rows.find((row) => isInspectable(row)) ?? null;
+    setSelectedIndividual(best ?? firstInspectable);
+  }, [optimizationResult, selectedIndividual]);
 
   const handleRunOptimization = async (isInitialSeed: boolean = false) => {
     setIsRunning(true);
-    setProgressGen(0);
-    setProgressPercent(0);
     setDeploySuccess(null);
-
-    // Simulated progress animation ticks while server runs 50 generations
-    const intervalTick = setInterval(() => {
-      setProgressGen(prev => {
-        const next = prev + 1;
-        if (next <= config.maxGenerations) {
-          setProgressPercent(Math.round((next / config.maxGenerations) * 100));
-          return next;
-        }
-        return prev;
-      });
-    }, 45);
+    setRunRefusal(null);
+    setOptimizationResult(null);
+    setSelectedIndividual(null);
 
     try {
       const res = await fetch("/api/genetic/run", {
@@ -143,21 +309,27 @@ export function GeneticOptimizerPanel({
         body: JSON.stringify(config)
       });
 
-      clearInterval(intervalTick);
-
       if (!res.ok) {
-        throw new Error(`Server returned status ${res.status}`);
+        const message = await readRouteRefusal(res);
+        console.error("Optimization failed:", message);
+        setRunRefusal(message);
+        return;
       }
 
-      const result: GeneticOptimizationResult = await res.json();
-      setProgressGen(config.maxGenerations);
-      setProgressPercent(100);
-      setOptimizationResult(result);
-      setSelectedIndividual(result.bestIndividual);
-    } catch (err: any) {
-      console.error("Optimization failed:", err);
+      const payload: unknown = await res.json();
+      if (!isRecord(payload)) {
+        const message = `Route refused the run (${res.status}): response had no result`;
+        console.error("Optimization failed:", message);
+        setRunRefusal(message);
+        return;
+      }
+
+      setOptimizationResult(payload as unknown as GeneticOptimizationResult);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Optimization refused";
+      console.error("Optimization failed:", message);
+      setRunRefusal(message);
     } finally {
-      clearInterval(intervalTick);
       setIsRunning(false);
     }
   };
@@ -172,9 +344,12 @@ export function GeneticOptimizerPanel({
       const isSeeded = config.baselineStrategyId && config.baselineStrategyId !== 'none';
       const baseline = isSeeded ? strategies.find(s => s.id === config.baselineStrategyId) : null;
       const nextVersion = baseline ? (baseline.version || 1) + 1 : 1;
+      const generationLabel = finiteNumber(individual.generation);
       const evolvedName = baseline
         ? `${baseline.name.replace(/ \(v\d+\)$/, '')} (v${nextVersion})`
-        : `Evolved Genome (${config.assetPair.replace('/', '')}) - Gen ${individual.generation || 50}`;
+        : generationLabel === null
+          ? `Evolved Genome (${config.assetPair.replace('/', '')})`
+          : `Evolved Genome (${config.assetPair.replace('/', '')}) - Gen ${generationLabel}`;
 
       const res = await fetch("/api/genetic/deploy-to-orchestrator", {
         method: "POST",
@@ -289,14 +464,60 @@ export function GeneticOptimizerPanel({
     }
   };
 
-  // Sorted population
-  const sortedPopulation = optimizationResult?.population ? [...optimizationResult.population].sort((a, b) => {
-    if (sortBy === 'fitness') return b.fitness - a.fitness;
-    if (sortBy === 'return') return b.overallReturn - a.overallReturn;
-    if (sortBy === 'sharpe') return b.sharpeRatio - a.sharpeRatio;
-    if (sortBy === 'drawdown') return a.overallDrawdown - b.overallDrawdown;
-    if (sortBy === 'robustness') return b.robustnessIndex - a.robustnessIndex;
-    return b.fitness - a.fitness;
+  const population = optimizationResult ? populationRows(optimizationResult) : null;
+  const generationCount = optimizationResult ? completedGenerations(optimizationResult) : null;
+  const elites = optimizationResult ? eliteCount(optimizationResult) : null;
+  const convergenceHistory = optimizationResult ? historyPoints(optimizationResult) : [];
+  const inSampleCandleCount = optimizationResult
+    ? responseCandleCount(optimizationResult, "inSampleCandles", "splitInSample")
+    : null;
+  const outOfSampleCandleCount = optimizationResult
+    ? responseCandleCount(optimizationResult, "outOfSampleCandles", "splitOutOfSample")
+    : null;
+  const bestIndividual = optimizationResult && isRecord(resultField(optimizationResult, "bestIndividual"))
+    ? resultField(optimizationResult, "bestIndividual") as GeneticIndividual
+    : null;
+  const bestReturn = finiteNumber(bestIndividual?.overallReturn);
+  const bestIsReturn = nestedNumber(bestIndividual, "inSampleSummary", "totalReturnPercent");
+  const bestOosReturn = nestedNumber(bestIndividual, "outOfSampleSummary", "totalReturnPercent");
+  const bestSharpe = finiteNumber(bestIndividual?.sharpeRatio);
+  const bestSortino = nestedNumber(bestIndividual, "inSampleSummary", "sortinoRatio");
+  const bestDrawdown = finiteNumber(bestIndividual?.overallDrawdown);
+  const bestPeakDrawdown = nestedNumber(bestIndividual, "inSampleSummary", "maxDrawdownUSD");
+  const bestWinRate = finiteNumber(bestIndividual?.winRate);
+  const bestTrades = finiteNumber(bestIndividual?.tradesCount);
+  const bestRobustness = finiteNumber(bestIndividual?.robustnessIndex);
+
+  const compareMetric = (left: number | null, right: number | null, direction: "asc" | "desc"): number => {
+    if (left === null && right === null) {
+      return 0;
+    }
+    if (left === null) {
+      return 1;
+    }
+    if (right === null) {
+      return -1;
+    }
+    return direction === "asc" ? left - right : right - left;
+  };
+
+  const sortedPopulation = population ? [...population].sort((a, b) => {
+    switch (sortBy) {
+      case "fitness":
+        return compareMetric(finiteNumber(a.fitness), finiteNumber(b.fitness), "desc");
+      case "return":
+        return compareMetric(finiteNumber(a.overallReturn), finiteNumber(b.overallReturn), "desc");
+      case "sharpe":
+        return compareMetric(finiteNumber(a.sharpeRatio), finiteNumber(b.sharpeRatio), "desc");
+      case "drawdown":
+        return compareMetric(finiteNumber(a.overallDrawdown), finiteNumber(b.overallDrawdown), "asc");
+      case "robustness":
+        return compareMetric(finiteNumber(a.robustnessIndex), finiteNumber(b.robustnessIndex), "desc");
+      default: {
+        const unreachable: never = sortBy;
+        return unreachable;
+      }
+    }
   }) : [];
 
   return (
@@ -315,14 +536,14 @@ export function GeneticOptimizerPanel({
                     Genetic Walk-Forward Strategy Optimizer
                   </h1>
                   <span className="bg-purple-900/60 text-purple-300 border border-purple-700/60 text-[10px] px-2 py-0.5 rounded font-mono font-bold uppercase tracking-wider">
-                    WFO-30/50/3
+                    Paper
                   </span>
                   <span className="bg-emerald-950/80 text-emerald-400 border border-emerald-800/60 text-[10px] px-2 py-0.5 rounded font-mono font-semibold">
                     In-Sample (70%) + Out-of-Sample (30%)
                   </span>
                 </div>
                 <p className="text-xs text-zinc-400 font-mono mt-0.5">
-                  Institutional GA evolution engine with 30 individuals, 50 generations, 3 elite survivors, ATR dynamic stops, RVOL volume, Trend EMAs, FVG imbalances, CISD structure, and MTF alignment.
+                  Paper genetic walk-forward. Generation, genome count, and rows appear only after the route returns them.
                 </p>
               </div>
             </div>
@@ -574,7 +795,7 @@ export function GeneticOptimizerPanel({
                 {isRunning ? (
                   <>
                     <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                    <span>Evolving ({progressPercent}%)</span>
+                    <span>Running</span>
                   </>
                 ) : (
                   <>
@@ -587,22 +808,23 @@ export function GeneticOptimizerPanel({
           </div>
         </div>
 
-        {/* Real-Time Generational Progress Bar */}
         {isRunning && (
-          <div className="mt-3 pt-3 border-t border-zinc-800">
-            <div className="flex justify-between text-[11px] font-mono text-zinc-400 mb-1.5">
-              <span className="flex items-center gap-1.5 text-purple-400 font-semibold">
-                <Dna className="w-3 h-3 animate-spin" />
-                <span>Simulating Generational Crossover &amp; Mutation (Gen {progressGen} / 50)...</span>
-              </span>
-              <span>{progressPercent}% Complete</span>
+          <div className="mt-3 pt-3 border-t border-zinc-800" role="status" data-testid="genetic-run-inflight">
+            <div className="flex items-center gap-1.5 text-[11px] font-mono text-purple-400 font-semibold">
+              <Dna className="w-3 h-3 animate-spin" />
+              <span>Running</span>
             </div>
-            <div className="w-full h-2 bg-zinc-950 rounded-full overflow-hidden border border-zinc-800">
-              <div 
-                className="h-full bg-gradient-to-r from-purple-600 via-indigo-500 to-emerald-500 transition-all duration-150"
-                style={{ width: `${progressPercent}%` }}
-              />
-            </div>
+          </div>
+        )}
+
+        {runRefusal && (
+          <div
+            className="mt-3 p-2.5 bg-rose-950/70 border border-rose-800/80 rounded-lg flex items-start gap-2"
+            role="alert"
+            data-testid="genetic-run-refusal"
+          >
+            <AlertTriangle className="w-4 h-4 text-rose-400 flex-shrink-0 mt-0.5" />
+            <span className="text-xs font-mono text-rose-300">{runRefusal}</span>
           </div>
         )}
 
@@ -641,15 +863,19 @@ export function GeneticOptimizerPanel({
                       </span>
                     </div>
                     <p className="text-[11px] font-mono text-purple-200/80 mt-0.5">
-                      Comparing Winner Genome <strong>{optimizationResult.bestIndividual.id}</strong> against original orchestrator baseline <strong>"{optimizationResult.baselineStrategyName || 'Seeded Strategy'}"</strong>.
+                      Comparing Winner Genome <strong>{bestIndividual?.id ?? "returned genome"}</strong> against original orchestrator baseline <strong>"{optimizationResult.baselineStrategyName || "Seeded Strategy"}"</strong>.
                     </p>
                   </div>
                 </div>
 
                 <div className="flex items-center space-x-2 self-start md:self-auto">
                   <button
-                    onClick={() => handleDeployToOrchestrator(optimizationResult.bestIndividual, true)}
-                    disabled={deploying}
+                    onClick={() => {
+                      if (isInspectable(bestIndividual)) {
+                        handleDeployToOrchestrator(bestIndividual, true);
+                      }
+                    }}
+                    disabled={deploying || !isInspectable(bestIndividual)}
                     className="px-3 py-1.5 bg-purple-600 hover:bg-purple-500 text-white rounded text-xs font-mono font-bold flex items-center gap-1.5 transition-colors shadow-sm"
                   >
                     {deploying ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3 fill-current" />}
@@ -675,7 +901,7 @@ export function GeneticOptimizerPanel({
                   <div className="text-sm font-mono font-bold text-purple-300 mt-0.5 flex items-baseline gap-1">
                     <span>{optimizationResult.baselineComparison.sharpeDelta >= 0 ? '+' : ''}{optimizationResult.baselineComparison.sharpeDelta}</span>
                     <span className="text-[10px] text-zinc-500 font-normal">
-                      (from {optimizationResult.baselineIndividual.sharpeRatio.toFixed(2)})
+                      (from {showFixed(optimizationResult.baselineIndividual.sharpeRatio, 2)})
                     </span>
                   </div>
                 </div>
@@ -711,12 +937,14 @@ export function GeneticOptimizerPanel({
               Best Genome Return
             </span>
             <div className="text-xl font-mono font-bold text-white mt-1 flex items-baseline gap-1.5">
-              <span className={optimizationResult.bestIndividual.overallReturn >= 0 ? "text-emerald-400" : "text-rose-400"}>
-                {optimizationResult.bestIndividual.overallReturn >= 0 ? '+' : ''}{optimizationResult.bestIndividual.overallReturn}%
+              <span className={bestReturn !== null && bestReturn >= 0 ? "text-emerald-400" : "text-rose-400"}>
+                {bestReturn === null ? "—" : `${bestReturn >= 0 ? "+" : ""}${bestReturn}%`}
               </span>
             </div>
             <span className="text-[10px] font-mono text-zinc-500 mt-1 block">
-              IS: +{optimizationResult.bestIndividual.inSampleSummary.totalReturnPercent}% | OOS: +{optimizationResult.bestIndividual.outOfSampleSummary.totalReturnPercent}%
+              {bestIsReturn === null ? "IS: —" : `IS: ${bestIsReturn >= 0 ? "+" : ""}${bestIsReturn}%`}
+              {" | "}
+              {bestOosReturn === null ? "OOS: —" : `OOS: ${bestOosReturn >= 0 ? "+" : ""}${bestOosReturn}%`}
             </span>
           </div>
 
@@ -726,10 +954,10 @@ export function GeneticOptimizerPanel({
               Sharpe Ratio
             </span>
             <div className="text-xl font-mono font-bold text-purple-400 mt-1">
-              {optimizationResult.bestIndividual.sharpeRatio.toFixed(2)}
+              {bestSharpe === null ? "—" : bestSharpe.toFixed(2)}
             </div>
             <span className="text-[10px] font-mono text-zinc-500 mt-1 block">
-              Sortino: {optimizationResult.bestIndividual.inSampleSummary.sortinoRatio.toFixed(2)}
+              {bestSortino === null ? "Sortino: —" : `Sortino: ${bestSortino.toFixed(2)}`}
             </span>
           </div>
 
@@ -739,10 +967,10 @@ export function GeneticOptimizerPanel({
               Max Drawdown
             </span>
             <div className="text-xl font-mono font-bold text-rose-400 mt-1">
-              -{optimizationResult.bestIndividual.overallDrawdown}%
+              {bestDrawdown === null ? "—" : `-${bestDrawdown}%`}
             </div>
             <span className="text-[10px] font-mono text-zinc-500 mt-1 block">
-              Peak DD: ${optimizationResult.bestIndividual.inSampleSummary.maxDrawdownUSD.toFixed(0)}
+              {bestPeakDrawdown === null ? "Peak DD: —" : `Peak DD: $${bestPeakDrawdown.toFixed(0)}`}
             </span>
           </div>
 
@@ -752,10 +980,10 @@ export function GeneticOptimizerPanel({
               Win Rate
             </span>
             <div className="text-xl font-mono font-bold text-white mt-1">
-              {optimizationResult.bestIndividual.winRate}%
+              {bestWinRate === null ? "—" : `${bestWinRate}%`}
             </div>
             <span className="text-[10px] font-mono text-zinc-500 mt-1 block">
-              {optimizationResult.bestIndividual.tradesCount} total trades
+              {bestTrades === null ? "—" : `${bestTrades} total trades`}
             </span>
           </div>
 
@@ -765,11 +993,11 @@ export function GeneticOptimizerPanel({
               WFO Robustness
             </span>
             <div className="text-xl font-mono font-bold text-amber-400 mt-1 flex items-center gap-1">
-              <span>{optimizationResult.bestIndividual.robustnessIndex}%</span>
+              <span>{bestRobustness === null ? "—" : `${bestRobustness}%`}</span>
               <Award className="w-4 h-4 text-amber-400" />
             </div>
             <span className="text-[10px] font-mono text-zinc-500 mt-1 block">
-              {optimizationResult.bestIndividual.robustnessIndex >= 70 ? 'Low Overfit Risk' : 'Moderate Overfit'}
+              {bestRobustness === null ? "—" : bestRobustness >= 70 ? "Low Overfit Risk" : "Moderate Overfit"}
             </span>
           </div>
 
@@ -780,7 +1008,11 @@ export function GeneticOptimizerPanel({
                 Elite Survivors
               </span>
               <div className="text-xl font-mono font-bold text-white mt-1">
-                3 / 30 Elites
+                {elites !== null && population !== null
+                  ? `${elites} / ${population.length} Elites`
+                  : elites !== null
+                    ? `${elites} Elites`
+                    : "—"}
               </div>
             </div>
             <span className="text-[10px] font-mono text-purple-400">
@@ -806,7 +1038,7 @@ export function GeneticOptimizerPanel({
                     : 'text-zinc-400 hover:text-zinc-200'
                 }`}
               >
-                <span>30 Individuals Leaderboard</span>
+                <span>Leaderboard</span>
               </button>
               <button
                 onClick={() => setActiveViewTab('convergence')}
@@ -816,7 +1048,7 @@ export function GeneticOptimizerPanel({
                     : 'text-zinc-400 hover:text-zinc-200'
                 }`}
               >
-                <span>50-Gen Convergence Curve</span>
+                <span>Convergence</span>
               </button>
               <button
                 onClick={() => setActiveViewTab('walkforward')}
@@ -849,23 +1081,29 @@ export function GeneticOptimizerPanel({
             )}
           </div>
 
-          {/* TAB 1: 30 INDIVIDUALS POPULATION LEADERBOARD */}
-          {activeViewTab === 'leaderboard' && (
+          {activeViewTab === 'leaderboard' && !optimizationResult && (
+            <RunStatusNotice isRunning={isRunning} refusal={runRefusal} />
+          )}
+
+          {/* Population leaderboard — rows come only from the response */}
+          {activeViewTab === 'leaderboard' && optimizationResult && (
             <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden shadow-sm">
               <div className="p-3.5 border-b border-zinc-800 flex items-center justify-between bg-zinc-950/40">
                 <div className="flex items-center space-x-2">
                   <Flame className="w-4 h-4 text-amber-400" />
                   <h3 className="text-xs font-mono font-bold text-white uppercase tracking-wider">
-                    Evolved Population (Generation 50)
+                    {generationCount === null ? "Evolved Population" : `Evolved Population (Generation ${generationCount})`}
                   </h3>
-                  <span className="bg-zinc-800 text-zinc-400 text-[10px] px-1.5 py-0.2 rounded font-mono">
-                    30 Genomes
-                  </span>
+                  {population !== null && (
+                    <span className="bg-zinc-800 text-zinc-400 text-[10px] px-1.5 py-0.2 rounded font-mono" data-testid="genetic-genome-count">
+                      {population.length} Genomes
+                    </span>
+                  )}
                 </div>
                 <div className="flex items-center space-x-2 text-[11px] font-mono text-zinc-400">
                   <span className="flex items-center gap-1">
                     <span className="w-2 h-2 rounded-full bg-amber-400" />
-                    <span>Top 3 Survivors (Elites)</span>
+                    <span>{elites === null ? "Survivors" : `Top ${elites} Survivors`}</span>
                   </span>
                 </div>
               </div>
@@ -889,12 +1127,24 @@ export function GeneticOptimizerPanel({
                   <tbody className="divide-y divide-zinc-800/60">
                     {sortedPopulation.map((ind, idx) => {
                       const isSelected = selectedIndividual?.id === ind.id;
-                      const isSurvivor = ind.isSurvivor || ind.rank <= 3;
+                      const isSurvivor = ind.isSurvivor === true;
+                      const rank = finiteNumber(ind.rank);
+                      const fitness = finiteNumber(ind.fitness);
+                      const overallReturn = finiteNumber(ind.overallReturn);
+                      const sharpeRatio = finiteNumber(ind.sharpeRatio);
+                      const overallDrawdown = finiteNumber(ind.overallDrawdown);
+                      const winRate = finiteNumber(ind.winRate);
+                      const robustnessIndex = finiteNumber(ind.robustnessIndex);
+                      const genomeId = typeof ind.id === "string" && ind.id.length > 0 ? ind.id : null;
                       
                       return (
                         <tr
-                          key={`${ind.id || 'ind'}-${idx}`}
-                          onClick={() => setSelectedIndividual(ind)}
+                          key={`${genomeId ?? "row"}-${idx}`}
+                          onClick={() => {
+                            if (isInspectable(ind)) {
+                              setSelectedIndividual(ind);
+                            }
+                          }}
                           className={`cursor-pointer transition-colors ${
                             isSelected
                               ? 'bg-purple-950/40 border-l-2 border-l-purple-500'
@@ -913,11 +1163,11 @@ export function GeneticOptimizerPanel({
                                 </span>
                               ) : isSurvivor ? (
                                 <span className="bg-amber-950 text-amber-400 border border-amber-800/80 text-[9px] px-1.5 py-0.2 rounded font-bold">
-                                  #{ind.rank} 🏆
+                                  {rank === null ? "Survivor" : `#${rank}`}
                                 </span>
                               ) : (
                                 <span className="text-zinc-500 text-[11px]">
-                                  #{ind.rank}
+                                  {rank === null ? "—" : `#${rank}`}
                                 </span>
                               )}
                             </div>
@@ -927,7 +1177,7 @@ export function GeneticOptimizerPanel({
                           <td className="py-2.5 px-3 text-zinc-300 font-mono">
                             <div className="flex items-center gap-1.5">
                               <Dna className="w-3 h-3 text-purple-400 opacity-70" />
-                              <span className="font-semibold">{ind.id}</span>
+                              <span className="font-semibold">{genomeId ?? "—"}</span>
                               {ind.isBaselineSeed && (
                                 <span className="bg-zinc-800 text-purple-300 border border-purple-900/60 text-[9px] px-1 rounded">
                                   Orchestrator Baseline
@@ -938,41 +1188,43 @@ export function GeneticOptimizerPanel({
 
                           {/* Fitness */}
                           <td className="py-2.5 px-3 text-right font-bold text-purple-400">
-                            {ind.fitness.toFixed(1)}
+                            {fitness === null ? "—" : fitness.toFixed(1)}
                           </td>
 
                           {/* Return */}
                           <td className="py-2.5 px-3 text-right font-semibold">
-                            <span className={ind.overallReturn >= 0 ? "text-emerald-400" : "text-rose-400"}>
-                              {ind.overallReturn >= 0 ? '+' : ''}{ind.overallReturn}%
+                            <span className={overallReturn !== null && overallReturn >= 0 ? "text-emerald-400" : "text-rose-400"}>
+                              {overallReturn === null ? "—" : `${overallReturn >= 0 ? "+" : ""}${overallReturn}%`}
                             </span>
                           </td>
 
                           {/* Sharpe */}
                           <td className="py-2.5 px-3 text-right text-zinc-300">
-                            {ind.sharpeRatio.toFixed(2)}
+                            {sharpeRatio === null ? "—" : sharpeRatio.toFixed(2)}
                           </td>
 
                           {/* Max DD */}
                           <td className="py-2.5 px-3 text-right text-rose-400">
-                            -{ind.overallDrawdown}%
+                            {overallDrawdown === null ? "—" : `-${overallDrawdown}%`}
                           </td>
 
                           {/* Win Rate */}
                           <td className="py-2.5 px-3 text-right text-zinc-300">
-                            {ind.winRate}%
+                            {winRate === null ? "—" : `${winRate}%`}
                           </td>
 
                           {/* Robustness */}
                           <td className="py-2.5 px-3 text-right">
                             <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${
-                              ind.robustnessIndex >= 70
-                                ? 'bg-emerald-950/70 text-emerald-400 border border-emerald-800/60'
-                                : ind.robustnessIndex >= 50
-                                ? 'bg-amber-950/70 text-amber-400 border border-amber-800/60'
-                                : 'bg-rose-950/70 text-rose-400 border border-rose-800/60'
+                              robustnessIndex === null
+                                ? "bg-zinc-900 text-zinc-500 border border-zinc-800"
+                                : robustnessIndex >= 70
+                                ? "bg-emerald-950/70 text-emerald-400 border border-emerald-800/60"
+                                : robustnessIndex >= 50
+                                ? "bg-amber-950/70 text-amber-400 border border-amber-800/60"
+                                : "bg-rose-950/70 text-rose-400 border border-rose-800/60"
                             }`}>
-                              {ind.robustnessIndex}%
+                              {robustnessIndex === null ? "—" : `${robustnessIndex}%`}
                             </span>
                           </td>
 
@@ -981,7 +1233,9 @@ export function GeneticOptimizerPanel({
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
-                                setSelectedIndividual(ind);
+                                if (isInspectable(ind)) {
+                                  setSelectedIndividual(ind);
+                                }
                               }}
                               className="px-2 py-1 bg-zinc-800 hover:bg-purple-900/60 hover:text-purple-300 text-zinc-400 rounded text-[10px] font-mono transition-colors"
                             >
@@ -997,16 +1251,23 @@ export function GeneticOptimizerPanel({
             </div>
           )}
 
-          {/* TAB 2: 50-GENERATION CONVERGENCE CURVE */}
-          {activeViewTab === 'convergence' && (
+          {activeViewTab === 'convergence' && !optimizationResult && (
+            <RunStatusNotice isRunning={isRunning} refusal={runRefusal} />
+          )}
+
+          {activeViewTab === 'convergence' && optimizationResult && (
             <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 shadow-sm">
               <div className="flex items-center justify-between mb-3">
                 <div>
                   <h3 className="text-xs font-mono font-bold text-white uppercase tracking-wider">
-                    Generational Convergence &amp; Fitness Evolution (Gen 1 - 50)
+                    {generationCount === null
+                      ? "Generational Convergence"
+                      : `Generational Convergence (Generation ${generationCount})`}
                   </h3>
                   <p className="text-[11px] font-mono text-zinc-400 mt-0.5">
-                    Convergence chart tracking Best Fitness vs Average Population Fitness over all 50 evolution cycles.
+                    {convergenceHistory.length === 0
+                      ? "No generation history in the response."
+                      : `Best Fitness vs Average Population Fitness across ${convergenceHistory.length} returned generations.`}
                   </p>
                 </div>
                 <div className="flex items-center space-x-3 text-[11px] font-mono">
@@ -1024,7 +1285,7 @@ export function GeneticOptimizerPanel({
               {/* Convergence Line Chart */}
               <div className="h-72 w-full">
                 <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={optimizationResult?.history || []}>
+                  <LineChart data={convergenceHistory}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
                     <XAxis 
                       dataKey="generation" 
@@ -1063,6 +1324,16 @@ export function GeneticOptimizerPanel({
             </div>
           )}
 
+          {activeViewTab === 'walkforward' && !selectedIndividual && (
+            optimizationResult ? (
+              <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-8 text-center text-zinc-500 font-mono text-xs">
+                No walk-forward individual in the response.
+              </div>
+            ) : (
+              <RunStatusNotice isRunning={isRunning} refusal={runRefusal} />
+            )
+          )}
+
           {/* TAB 3: IN-SAMPLE VS OUT-OF-SAMPLE WALK-FORWARD COMPARISON */}
           {activeViewTab === 'walkforward' && selectedIndividual && (
             <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 shadow-sm space-y-4">
@@ -1090,21 +1361,21 @@ export function GeneticOptimizerPanel({
                     <div className="mt-3 space-y-2 text-xs font-mono">
                       <div className="flex justify-between">
                         <span className="text-zinc-400">Total Return:</span>
-                        <span className={optimizationResult.baselineIndividual.overallReturn >= 0 ? "text-purple-400 font-bold" : "text-rose-400 font-bold"}>
-                          {optimizationResult.baselineIndividual.overallReturn >= 0 ? '+' : ''}{optimizationResult.baselineIndividual.overallReturn}%
+                        <span className={(finiteNumber(optimizationResult.baselineIndividual.overallReturn) ?? -1) >= 0 ? "text-purple-400 font-bold" : "text-rose-400 font-bold"}>
+                          {showSignedPercent(optimizationResult.baselineIndividual.overallReturn)}
                         </span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-zinc-400">Sharpe Ratio:</span>
-                        <span className="text-white">{optimizationResult.baselineIndividual.sharpeRatio.toFixed(2)}</span>
+                        <span className="text-white">{showFixed(optimizationResult.baselineIndividual.sharpeRatio, 2)}</span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-zinc-400">Max Drawdown:</span>
-                        <span className="text-rose-400">-{optimizationResult.baselineIndividual.overallDrawdown}%</span>
+                        <span className="text-rose-400">{finiteNumber(optimizationResult.baselineIndividual.overallDrawdown) === null ? "—" : `-${optimizationResult.baselineIndividual.overallDrawdown}%`}</span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-zinc-400">Profit Factor:</span>
-                        <span className="text-white">{optimizationResult.baselineIndividual.inSampleSummary.profitFactor.toFixed(2)}</span>
+                        <span className="text-white">{showFixed(nestedNumber(optimizationResult.baselineIndividual, "inSampleSummary", "profitFactor"), 2)}</span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-zinc-400">Win Rate:</span>
@@ -1124,26 +1395,28 @@ export function GeneticOptimizerPanel({
                     <span className="text-xs font-mono font-bold text-emerald-400">
                       In-Sample Train (70% Data)
                     </span>
-                    <span className="text-[10px] font-mono text-zinc-500">
-                      {optimizationResult?.inSampleCandles || 350} Candles
-                    </span>
+                    {inSampleCandleCount !== null && (
+                      <span className="text-[10px] font-mono text-zinc-500">
+                        {inSampleCandleCount} Candles
+                      </span>
+                    )}
                   </div>
                   <div className="mt-3 space-y-2 text-xs font-mono">
                     <div className="flex justify-between">
                       <span className="text-zinc-400">Total Return:</span>
-                      <span className="text-emerald-400 font-bold">+{selectedIndividual.inSampleSummary.totalReturnPercent}%</span>
+                      <span className="text-emerald-400 font-bold">{showSignedPercent(selectedIndividual.inSampleSummary.totalReturnPercent)}</span>
                     </div>
                     <div className="flex justify-between">
                       <span className="text-zinc-400">Sharpe Ratio:</span>
-                      <span className="text-white">{selectedIndividual.inSampleSummary.sharpeRatio.toFixed(2)}</span>
+                      <span className="text-white">{showFixed(selectedIndividual.inSampleSummary.sharpeRatio, 2)}</span>
                     </div>
                     <div className="flex justify-between">
                       <span className="text-zinc-400">Max Drawdown:</span>
-                      <span className="text-rose-400">-{selectedIndividual.inSampleSummary.maxDrawdownPercent}%</span>
+                      <span className="text-rose-400">{finiteNumber(selectedIndividual.inSampleSummary.maxDrawdownPercent) === null ? "—" : `-${selectedIndividual.inSampleSummary.maxDrawdownPercent}%`}</span>
                     </div>
                     <div className="flex justify-between">
                       <span className="text-zinc-400">Profit Factor:</span>
-                      <span className="text-white">{selectedIndividual.inSampleSummary.profitFactor.toFixed(2)}</span>
+                      <span className="text-white">{showFixed(selectedIndividual.inSampleSummary.profitFactor, 2)}</span>
                     </div>
                     <div className="flex justify-between">
                       <span className="text-zinc-400">Win Rate:</span>
@@ -1162,26 +1435,28 @@ export function GeneticOptimizerPanel({
                     <span className="text-xs font-mono font-bold text-purple-400">
                       Out-of-Sample Test (30% Data)
                     </span>
-                    <span className="text-[10px] font-mono text-purple-300">
-                      {optimizationResult?.outOfSampleCandles || 150} Candles
-                    </span>
+                    {outOfSampleCandleCount !== null && (
+                      <span className="text-[10px] font-mono text-purple-300">
+                        {outOfSampleCandleCount} Candles
+                      </span>
+                    )}
                   </div>
                   <div className="mt-3 space-y-2 text-xs font-mono">
                     <div className="flex justify-between">
                       <span className="text-zinc-400">Total Return:</span>
-                      <span className="text-purple-400 font-bold">+{selectedIndividual.outOfSampleSummary.totalReturnPercent}%</span>
+                      <span className="text-purple-400 font-bold">{showSignedPercent(selectedIndividual.outOfSampleSummary.totalReturnPercent)}</span>
                     </div>
                     <div className="flex justify-between">
                       <span className="text-zinc-400">Sharpe Ratio:</span>
-                      <span className="text-white">{selectedIndividual.outOfSampleSummary.sharpeRatio.toFixed(2)}</span>
+                      <span className="text-white">{showFixed(selectedIndividual.outOfSampleSummary.sharpeRatio, 2)}</span>
                     </div>
                     <div className="flex justify-between">
                       <span className="text-zinc-400">Max Drawdown:</span>
-                      <span className="text-rose-400">-{selectedIndividual.outOfSampleSummary.maxDrawdownPercent}%</span>
+                      <span className="text-rose-400">{finiteNumber(selectedIndividual.outOfSampleSummary.maxDrawdownPercent) === null ? "—" : `-${selectedIndividual.outOfSampleSummary.maxDrawdownPercent}%`}</span>
                     </div>
                     <div className="flex justify-between">
                       <span className="text-zinc-400">Profit Factor:</span>
-                      <span className="text-white">{selectedIndividual.outOfSampleSummary.profitFactor.toFixed(2)}</span>
+                      <span className="text-white">{showFixed(selectedIndividual.outOfSampleSummary.profitFactor, 2)}</span>
                     </div>
                     <div className="flex justify-between">
                       <span className="text-zinc-400">Win Rate:</span>
@@ -1202,15 +1477,17 @@ export function GeneticOptimizerPanel({
                     Curve-Fitting Risk Assessment
                   </span>
                   <p className="text-xs font-mono text-zinc-300 mt-0.5">
-                    {selectedIndividual.robustnessIndex >= 70
-                      ? '✅ Strategy exhibits high out-of-sample persistence. Low risk of curve-fitting.'
-                      : '⚠️ Moderate performance drop in validation. Recommend keeping ATR buffer wide.'}
+                    {finiteNumber(selectedIndividual.robustnessIndex) === null
+                      ? "Robustness was not in the response."
+                      : selectedIndividual.robustnessIndex >= 70
+                      ? "Strategy exhibits high out-of-sample persistence. Low risk of curve-fitting."
+                      : "Moderate performance drop in validation. Recommend keeping ATR buffer wide."}
                   </p>
                 </div>
                 <div className="text-right">
                   <span className="text-xs font-mono text-zinc-500 uppercase">Robustness</span>
                   <div className="text-lg font-mono font-bold text-amber-400">
-                    {selectedIndividual.robustnessIndex}%
+                    {finiteNumber(selectedIndividual.robustnessIndex) === null ? "—" : `${selectedIndividual.robustnessIndex}%`}
                   </div>
                 </div>
               </div>
@@ -1236,12 +1513,18 @@ export function GeneticOptimizerPanel({
                     )}
                     {selectedIndividual.isSurvivor && (
                       <span className="bg-amber-950 text-amber-400 border border-amber-800/80 text-[9px] px-1.5 py-0.2 rounded font-bold uppercase">
-                        Survivor #1
+                        {finiteNumber(selectedIndividual.rank) === null ? "Survivor" : `Survivor #${selectedIndividual.rank}`}
                       </span>
                     )}
                   </div>
                   <span className="text-[10px] font-mono text-zinc-500 block mt-0.5">
-                    Fitness: {selectedIndividual.fitness} | {selectedIndividual.isBaselineSeed ? 'Seed Ancestor' : 'Generation 50'}
+                    Fitness: {finiteNumber(selectedIndividual.fitness) === null ? "—" : selectedIndividual.fitness}
+                    {" | "}
+                    {selectedIndividual.isBaselineSeed
+                      ? "Seed Ancestor"
+                      : finiteNumber(selectedIndividual.generation) === null
+                        ? "Returned genome"
+                        : `Generation ${selectedIndividual.generation}`}
                   </span>
                 </div>
 
@@ -1498,9 +1781,17 @@ export function GeneticOptimizerPanel({
               </div>
             </div>
           ) : (
-            <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-8 text-center text-zinc-500 font-mono text-xs">
-              Select an individual from the 30-Genome leaderboard to inspect its genetic chromosome.
-            </div>
+            population !== null && population.length > 0 ? (
+              <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-8 text-center text-zinc-500 font-mono text-xs">
+                Select an individual to inspect its genetic chromosome.
+              </div>
+            ) : optimizationResult ? (
+              <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-8 text-center text-zinc-500 font-mono text-xs">
+                No genomes in the response.
+              </div>
+            ) : (
+              <RunStatusNotice isRunning={isRunning} refusal={runRefusal} />
+            )
           )}
         </div>
       </div>
