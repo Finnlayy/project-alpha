@@ -6,6 +6,20 @@ Otherwise both legs paper-close the same shortfall, the lesser top, and never
 more than half the open quantity. A zero shortfall or missing quotes closes
 neither leg. An open gap still above 0.0031 does not flatten. The open stays
 all-or-nothing. Live create stays refused. No network and no exchange order.
+
+Paper learning ledger, trace alpha-paper-ledger-20261003. The append-only
+file is data/memory/paper_learning.jsonl from the repository root. Tests
+point that path at a temporary file. One JSON line is appended only after
+a cross paper flatten newly commits and the in-memory position for that
+close is cleared. The line has seven keys: "what worked" is "paper flatten
+committed"; "what failed", "root cause", "strategy update", and "human
+feedback" are empty strings; "confidence before" and "confidence after"
+are null. A failed append leaves the paper fill in place. A missing,
+empty, or unreadable file does not stop the tick. The last line is read
+at the start of a tick and is not used to place an order, change a gap
+check, or apply a strategy update. An open, a tick, a refused flatten, a
+duplicate effect that did not newly commit, and stop_instance do not
+append a line.
 """
 from __future__ import annotations
 
@@ -15,6 +29,7 @@ import json
 import os
 import tempfile
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -22,7 +37,8 @@ from fastapi import HTTPException
 
 from app.api.routes import strategies_create, strategies_update
 from app.config import Settings
-from app.execution.cross_book_paper import tick_cross_book
+import app.execution.cross_book_paper as cross_book_paper
+from app.execution.cross_book_paper import flatten_cross_book, tick_cross_book
 from app.execution.trading_engine import TradingEngine
 from app.kraken.futures_client import KrakenFuturesClient
 from app.kraken.spot_client import KrakenError, KrakenSpotClient
@@ -226,8 +242,13 @@ def _quiesce(engine, instance_id):
 
 
 @pytest.fixture
-def engine_env():
+def engine_env(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp:
+        learning = Path(tmp) / "data" / "memory" / "paper_learning.jsonl"
+        monkeypatch.setattr(
+            "app.execution.cross_book_paper.paper_learning_path",
+            lambda: learning,
+        )
         settings = Settings()
         settings.db_path = os.path.join(tmp, "test.duckdb")
         settings.min_poll_seconds = 30
@@ -742,3 +763,194 @@ def test_native_pair_mapping_stays_on_the_kraken_clients():
         "PF_XRPUSD",
     )
     assert fut is not None and fut.bid == Decimal("1.2")
+
+
+def _expected_learning_line():
+    return {
+        "what worked": "paper flatten committed",
+        "what failed": "",
+        "root cause": "",
+        "strategy update": "",
+        "human feedback": "",
+        "confidence before": None,
+        "confidence after": None,
+    }
+
+
+def _learning_path() -> Path:
+    return cross_book_paper.paper_learning_path()
+
+
+def _learning_rows():
+    path = _learning_path()
+    if not path.exists():
+        return []
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            rows.append(json.loads(line))
+    return rows
+
+
+def test_successful_flatten_appends_one_learning_line(engine_env):
+    engine, lake, books = engine_env
+    path = _learning_path()
+    row, rt = _open_cross(engine, books, "2")
+    assert not path.exists()
+    _exit_books(books, "2", "2", futures_bid="100.00")
+    result = flatten_cross_book(engine, rt, "GAP_COLLAPSED")
+    assert result is None
+    assert rt.position is None
+    assert rt.last_error is None
+    assert rt.last_signal["flattened"] is True
+    assert len(lake.trades_for(instance_id=row["id"])) == 1
+    raw_lines = path.read_text(encoding="utf-8").splitlines()
+    assert raw_lines and len([line for line in raw_lines if line.strip()]) == 1
+    parsed = json.loads(raw_lines[0])
+    assert list(parsed) == list(_expected_learning_line())
+    assert parsed == _expected_learning_line()
+    assert len(parsed) == 7
+
+
+def test_refused_flatten_appends_nothing(engine_env):
+    engine, lake, books = engine_env
+    path = _learning_path()
+    row, rt = _open_cross(engine, books, "2")
+    assert not path.exists()
+    _exit_books(books, "2", "2", futures_bid="100.32")
+    result = flatten_cross_book(engine, rt, "GAP_COLLAPSED")
+    assert result is None
+    assert rt.position is not None
+    assert rt.position["base_qty"] == Decimal("2")
+    assert lake.trades_for(instance_id=row["id"]) == []
+    assert rt.last_error == "flatten refused; open gap still exceeds 0.0031; neither leg closed"
+    assert not path.exists()
+
+
+def test_missing_learning_file_does_not_stop_the_tick(engine_env):
+    engine, _lake, books = engine_env
+    path = _learning_path()
+    assert not path.exists()
+    _row, rt = _open_cross(engine, books, "2")
+    assert rt.position is not None
+    assert rt.last_error is None
+    assert rt.position["base_qty"] == Decimal("2")
+    assert not path.exists()
+    assert not path.parent.exists()
+
+
+def test_empty_or_unreadable_learning_file_does_not_stop_the_tick(engine_env, monkeypatch):
+    engine, _lake, books = engine_env
+    path = _learning_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n", encoding="utf-8")
+    row = engine.start_instance(STRATEGY_NAME, "empty-ledger", "ETH/USD", 1, {}, "paper")
+    rt = _quiesce(engine, row["id"])
+    books.spot = _spot_book("99", "2", "100", "2", native="ETHUSD")
+    books.futures = _futures_book("100.40", "2", "100.80", "2", symbol="PF_ETHUSD")
+    tick_cross_book(engine, rt)
+    assert rt.position is not None
+    assert rt.last_error is None
+    assert path.read_text(encoding="utf-8") == "\n"
+
+    blocked = {"n": 0}
+    real_read_text = Path.read_text
+
+    def _read_text(self, *args, **kwargs):
+        if self.name == "paper_learning.jsonl":
+            blocked["n"] += 1
+            raise OSError("ledger unreadable")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _read_text)
+    rt.position = None
+    tick_cross_book(engine, rt)
+    assert blocked["n"] >= 1
+    assert rt.position is not None
+    assert rt.last_error is None
+
+
+def test_learning_line_is_read_and_not_applied(engine_env):
+    engine, _lake, books = engine_env
+    path = _learning_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(_expected_learning_line(), ensure_ascii=True, separators=(",", ":"))
+    original = line + "\n" + line + "\n"
+    path.write_text(original, encoding="utf-8")
+    row = engine.start_instance(STRATEGY_NAME, "cross", "BTC/USD", 1, {}, "paper")
+    rt = _quiesce(engine, row["id"])
+    books.spot = _spot_book("99", "2", "100", "2")
+    books.futures = _futures_book("100.04", "2", "100.80", "2")
+    tick_cross_book(engine, rt)
+    assert rt.position is None
+    assert rt.last_error == "gross gap does not exceed fee hurdle 0.0031"
+    books.futures = _futures_book("100.40", "2", "100.80", "2")
+    tick_cross_book(engine, rt)
+    assert rt.position is not None
+    assert rt.position["base_qty"] == Decimal("2")
+    assert path.read_text(encoding="utf-8") == original
+
+
+def test_duplicate_flatten_does_not_append_again(engine_env):
+    engine, lake, books = engine_env
+    row, rt = _open_cross(engine, books, "2")
+    held = rt.position
+    _exit_books(books, "2", "2", futures_bid="100.00")
+    flatten_cross_book(engine, rt, "GAP_COLLAPSED")
+    assert _learning_rows() == [_expected_learning_line()]
+    assert len(lake.trades_for(instance_id=row["id"])) == 1
+    rt.position = held
+    result = flatten_cross_book(engine, rt, "GAP_COLLAPSED")
+    assert result is None
+    assert rt.position is None
+    assert len(lake.trades_for(instance_id=row["id"])) == 1
+    assert _learning_rows() == [_expected_learning_line()]
+
+
+def test_partial_flatten_appends_one_learning_line(engine_env):
+    engine, lake, books = engine_env
+    row, rt = _open_cross(engine, books, "2")
+    _exit_books(books, "0.4", "0.7", futures_bid="100.00")
+    result = flatten_cross_book(engine, rt, "GAP_COLLAPSED")
+    assert result is None
+    assert rt.position is not None
+    assert rt.position["base_qty"] == Decimal("1.6")
+    assert len(lake.trades_for(instance_id=row["id"])) == 1
+    assert _learning_rows() == [_expected_learning_line()]
+
+
+def test_stop_instance_does_not_append_a_learning_line(engine_env):
+    engine, lake, books = engine_env
+    row, rt = _open_cross(engine, books, "2")
+    _exit_books(books, "2", "2", futures_bid="100.00")
+    stopped = engine.stop_instance(row["id"], "INSTANCE_STOP")
+    assert stopped["status"] == "stopped"
+    assert rt.position is None
+    assert len(lake.trades_for(instance_id=row["id"])) == 1
+    assert _learning_rows() == []
+    assert not _learning_path().exists()
+
+
+def test_failed_learning_append_leaves_the_committed_fill(engine_env, monkeypatch, tmp_path):
+    engine, lake, books = engine_env
+    row, rt = _open_cross(engine, books, "2")
+    _exit_books(books, "2", "2", futures_bid="100.00")
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "app.execution.cross_book_paper.paper_learning_path",
+        lambda: blocker / "paper_learning.jsonl",
+    )
+    result = flatten_cross_book(engine, rt, "GAP_COLLAPSED")
+    assert result is None
+    assert rt.position is None
+    assert rt.last_error is None
+    assert rt.last_signal["flattened"] is True
+    assert rt.last_signal["full_close"] is True
+    assert rt.last_signal["closed_base_qty"] == "2"
+    trades = lake.trades_for(instance_id=row["id"])
+    assert len(trades) == 1
+    assert trades[0]["mode"] == "paper"
+    assert Decimal(str(trades[0]["amount"])) == Decimal("2")
+    assert blocker.is_file()
+    assert not (blocker / "paper_learning.jsonl").exists()

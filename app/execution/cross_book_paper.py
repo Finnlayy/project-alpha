@@ -13,12 +13,35 @@ quotes, closes neither leg. No lot step is invented.
 
 Order effects are SHA-256 deduped. Live create is refused. This module never
 places a live order. Paper fills stay inside the paper book.
+
+Paper learning ledger, trace alpha-paper-ledger-20261003. The append-only
+file is data/memory/paper_learning.jsonl from the repository root. On Finn's
+machine that same file is
+/home/finn-powers/project-alpha/data/memory/paper_learning.jsonl.
+One JSON object is written per line only after a cross paper flatten newly
+commits and the in-memory position for that close is cleared. A partial
+close counts: that position is cleared before a residual open is restored.
+The line has seven keys. "what worked" is "paper flatten committed".
+"what failed", "root cause", "strategy update", and "human feedback" are
+empty strings. "confidence before" and "confidence after" are null. The
+line has no fill id, clock, worker id, symbol, or price, and it is not
+applied as a strategy update. A failed append leaves the paper fill in
+place and leaves the flatten result unchanged. data/memory is created on
+the first append. At the start of a tick, a non-empty ledger is read for
+its last line. That line is not used to place an order, to change a gap
+check, or to apply a strategy update. A missing, empty, or unreadable
+ledger does not stop the tick. An open, a tick, a refused flatten, a
+duplicate effect that did not newly commit, and stop_instance do not
+append a line.
 """
 from __future__ import annotations
 
+import inspect
 import json
+import threading
 import time
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from app.kraken.futures_client import KrakenFuturesClient
@@ -49,6 +72,86 @@ from app.strategies.cross_book_kraken_spot_pro_paper import (
 )
 
 _LIVE_REFUSED = "CROSS_BOOK_KRAKEN_SPOT_PRO_PAPER refuses live create"
+_PAPER_LEARNING_LOCK = threading.Lock()
+
+
+def paper_learning_path() -> Path:
+    """Ledger path from the repository root: data/memory/paper_learning.jsonl."""
+    return Path(__file__).resolve().parents[2] / "data" / "memory" / "paper_learning.jsonl"
+
+
+def _committed_flatten_learning_record() -> Dict[str, Any]:
+    return {
+        "what worked": "paper flatten committed",
+        "what failed": "",
+        "root cause": "",
+        "strategy update": "",
+        "human feedback": "",
+        "confidence before": None,
+        "confidence after": None,
+    }
+
+
+def _called_from_stop_instance() -> bool:
+    """A flatten requested by stop_instance does not append a learning line."""
+    frame = inspect.currentframe()
+    try:
+        while frame is not None:
+            if frame.f_code.co_name == "stop_instance":
+                return True
+            frame = frame.f_back
+        return False
+    finally:
+        del frame
+
+
+def _append_paper_learning_line() -> None:
+    path = paper_learning_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(
+        _committed_flatten_learning_record(),
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    with _PAPER_LEARNING_LOCK:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+            handle.flush()
+
+
+def _record_committed_paper_flatten() -> None:
+    """Append one learning line. A failure leaves the committed fill alone."""
+    try:
+        if _called_from_stop_instance():
+            return
+        _append_paper_learning_line()
+    except Exception:
+        return
+
+
+def _last_nonempty_line(text: str) -> Optional[str]:
+    last: Optional[str] = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            last = stripped
+    return last
+
+
+def _read_last_paper_learning_line() -> None:
+    """Read the last ledger line and do not feed it into trading."""
+    try:
+        path = paper_learning_path()
+        if not path.is_file():
+            return
+        with _PAPER_LEARNING_LOCK:
+            text = path.read_text(encoding="utf-8")
+        last = _last_nonempty_line(text)
+        if last is None:
+            return
+        _ = json.loads(last)
+    except Exception:
+        return
 
 
 def futures_client(engine: Any) -> Any:
@@ -161,7 +264,12 @@ def _restore_open_position(engine: Any, rt: Any) -> None:
 
 
 def tick_cross_book(engine: Any, rt: Any) -> None:
-    """Read both books and paper-open a cross, or leave both legs untouched."""
+    """Read both books and paper-open a cross, or leave both legs untouched.
+
+    The last paper-learning line is read first when the ledger exists.
+    That line does not place an order, change a gap check, or update a strategy.
+    """
+    _read_last_paper_learning_line()
     spec = rt.spec
     if spec.get("mode") != "paper" or spec.get("strategy_type") != STRATEGY_NAME:
         rt.waiting = True
@@ -450,6 +558,8 @@ def _commit_flatten(
         _restore_open_position(engine, rt)
     except CrossBookStateError as exc:
         rt.last_error = str(exc)
+        if committed:
+            _record_committed_paper_flatten()
         return
     rt.last_error = None
     rt.last_mark = float(spot_book.bid)
@@ -476,3 +586,4 @@ def _commit_flatten(
             ),
             rt.spec["id"],
         )
+        _record_committed_paper_flatten()
