@@ -12,12 +12,20 @@ Tables:
   paper_accounts(mode, balance_usd, updated_at)
 
 Everything is real persistence — no in-memory pretend state.
+
+A cross-book flatten records the quantity closed on both legs together. That
+quantity is the full open quantity, or the same shortfall on both legs and
+never more than half the open quantity. The residual open quantity is the
+original open minus those closes. A zero close is not stored. This store does
+not pick a pair, invent a lot step, or send a live order. The paper worker
+flattens only when the open gap is at or under 0.0031.
 """
 from __future__ import annotations
 
 import json
 import threading
 import time
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional
 
 import duckdb
@@ -84,6 +92,19 @@ def _decode_effect_payload(payload_json: str) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         raise RuntimeError("corrupt cross-book effect payload")
     return payload
+
+
+def _effect_base_qty(payload: Dict[str, Any]) -> Decimal:
+    raw = payload.get("base_qty")
+    if isinstance(raw, bool) or raw is None:
+        raise RuntimeError("cross-book effect base quantity is missing")
+    try:
+        number = Decimal(str(raw).strip())
+    except (InvalidOperation, ValueError) as exc:
+        raise RuntimeError("cross-book effect base quantity is unreadable") from exc
+    if not number.is_finite() or number <= 0:
+        raise RuntimeError("cross-book effect base quantity is not positive")
+    return number
 
 
 class DataLake:
@@ -294,7 +315,12 @@ class DataLake:
             return True
 
     def unflattened_cross_open(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """The single open cross effect for a symbol that has no flatten, or None."""
+        """The single open cross for a symbol that still has quantity, or None.
+
+        Each flatten base_qty is the quantity closed on both legs. The residual
+        is the open quantity minus the sum of those closes. A flatten that
+        covers the open quantity removes it. One leg is never stored alone.
+        """
         with self._lock:
             opens = self._conn.execute(
                 """SELECT effect_hash, instance_id, payload_json, created_at
@@ -305,22 +331,32 @@ class DataLake:
                 "SELECT payload_json FROM effect_dedup WHERE symbol=? AND action='flatten'",
                 [symbol],
             ).fetchall()
-        flattened = set()
+        closed_by_open: Dict[str, Decimal] = {}
         for (payload_json,) in flats:
             payload = _decode_effect_payload(payload_json)
             opened = payload.get("opens_effect_hash")
-            if isinstance(opened, str) and opened:
-                flattened.add(opened)
+            if not isinstance(opened, str) or not opened:
+                raise RuntimeError(f"flatten effect for {symbol} does not name its open; entry refused")
+            closed_by_open[opened] = closed_by_open.get(opened, Decimal("0")) + _effect_base_qty(payload)
         live = []
         for effect_hash, instance_id, payload_json, created_at in opens:
-            if effect_hash in flattened:
+            payload = _decode_effect_payload(payload_json)
+            original = _effect_base_qty(payload)
+            closed = closed_by_open.get(effect_hash, Decimal("0"))
+            if closed < 0 or closed > original:
+                raise RuntimeError(f"flatten quantity exceeds open quantity for {symbol}; entry refused")
+            if closed == original:
                 continue
+            remaining = original - closed
+            if remaining <= 0:
+                raise RuntimeError(f"flatten residual for {symbol} is not positive; entry refused")
             live.append(
                 {
                     "effect_hash": effect_hash,
                     "instance_id": instance_id,
-                    "payload": _decode_effect_payload(payload_json),
+                    "payload": payload,
                     "created_at": int(created_at or 0),
+                    "remaining_base_qty": format(remaining, "f"),
                 }
             )
         if len(live) > 1:

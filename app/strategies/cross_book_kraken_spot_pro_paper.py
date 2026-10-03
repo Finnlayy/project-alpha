@@ -4,10 +4,21 @@ CROSS_BOOK_KRAKEN_SPOT_PRO_PAPER — paper cross of Kraken spot vs Kraken future
 Trace: alpha-p2-20261002-1209
 
 The symbol is an instance parameter. This module does not bind a symbol.
-Executable top of book only: buy the cheaper ask, sell the richer bid.
-Entry requires the gross gap to exceed the paper fee hurdle
+
+Entry uses the executable top of book only: buy the cheaper ask, sell the richer
+bid. Both legs open the full shared quantity, or neither leg opens. Entry
+requires the gross gap to exceed the paper fee hurdle
 0.0026 (spot) + 0.0005 (futures) = 0.0031.
-Live create is refused. No live order is sent from this module.
+
+Flatten is allowed only when the open gap is at or under 0.0031. A wider open
+gap does not flatten. When both opposite tops can fill the full open quantity,
+both legs paper-close that full quantity. The half cap does not limit a full
+close. When a top is thinner, both legs paper-close the same shortfall: the
+lesser of the two tops, and never more than half of the open quantity. A zero
+shortfall, or missing quotes, closes neither leg. No lot step is invented; the
+close uses the quantity the tops already imply.
+
+Live create is refused. No live order is sent. Paper fills stay in the paper book.
 """
 from __future__ import annotations
 
@@ -333,18 +344,32 @@ def flatten_effect_payload(
     spot_exit_price: Decimal,
     futures_exit_side: str,
     futures_exit_price: Decimal,
+    closed_base_qty: Decimal,
+    closed_contracts: Decimal,
+    position_base_qty: Decimal,
 ) -> Dict[str, str]:
+    """Effect for one paper close of both legs.
+
+    base_qty is the quantity closed on this flatten, not the original open.
+    position_base_qty is the quantity still open before this close, so a later
+    slice of the same cross hashes to a different effect.
+    """
+    if closed_base_qty <= 0 or closed_contracts <= 0 or position_base_qty <= 0:
+        raise CrossBookStateError("flatten effect requires a positive quantity on both legs")
+    if closed_base_qty > position_base_qty:
+        raise CrossBookStateError("flatten effect closes more than the open quantity")
     return {
         "action": "flatten",
-        "base_qty": open_payload["base_qty"],
+        "base_qty": _canon(closed_base_qty),
         "contract": open_payload["contract"],
         "contract_size": open_payload["contract_size"],
-        "futures_contracts": open_payload["futures_contracts"],
+        "futures_contracts": _canon(closed_contracts),
         "futures_exit_price": _canon(futures_exit_price),
         "futures_exit_side": futures_exit_side,
         "futures_fee_rate": open_payload["futures_fee_rate"],
         "instance_id": open_payload["instance_id"],
         "opens_effect_hash": open_hash,
+        "position_base_qty": _canon(position_base_qty),
         "spot_exit_price": _canon(spot_exit_price),
         "spot_exit_side": spot_exit_side,
         "spot_fee_rate": open_payload["spot_fee_rate"],
@@ -361,7 +386,11 @@ def _require_decimal(payload: Dict[str, Any], key: str) -> Decimal:
     return number
 
 
-def position_from_open_payload(payload: Dict[str, Any], effect_hash: str) -> Dict[str, Any]:
+def position_from_open_payload(
+    payload: Dict[str, Any],
+    effect_hash: str,
+    remaining_base_qty: Optional[Decimal] = None,
+) -> Dict[str, Any]:
     if payload.get("action") != "open" or payload.get("strategy") != STRATEGY_NAME:
         raise CrossBookStateError("open effect payload is not a cross-book open")
     spot_side = payload.get("spot_side")
@@ -372,9 +401,30 @@ def position_from_open_payload(payload: Dict[str, Any], effect_hash: str) -> Dic
         raise CrossBookStateError("open effect sides are not a cross")
     spot_price = _require_decimal(payload, "spot_price")
     futures_price = _require_decimal(payload, "futures_price")
-    base_qty = _require_decimal(payload, "base_qty")
-    contracts = _require_decimal(payload, "futures_contracts")
+    original_base = _require_decimal(payload, "base_qty")
+    original_contracts = _require_decimal(payload, "futures_contracts")
     contract_size = _require_decimal(payload, "contract_size")
+    if remaining_base_qty is None or remaining_base_qty == original_base:
+        base_qty = original_base
+        contracts = original_contracts
+    else:
+        if (
+            not isinstance(remaining_base_qty, Decimal)
+            or not remaining_base_qty.is_finite()
+            or remaining_base_qty <= 0
+            or remaining_base_qty > original_base
+        ):
+            raise CrossBookStateError("remaining cross quantity is not inside the open quantity")
+        scaled_contracts = original_contracts * (remaining_base_qty / original_base)
+        if scaled_contracts * contract_size == remaining_base_qty:
+            contracts = scaled_contracts
+        else:
+            contracts = remaining_base_qty / contract_size
+            if contracts * contract_size != remaining_base_qty:
+                raise CrossBookStateError("remaining cross quantity does not match both legs")
+        if contracts <= 0 or contracts > original_contracts:
+            raise CrossBookStateError("remaining cross contracts are not inside the open quantity")
+        base_qty = remaining_base_qty
     spot_rate = _positive_decimal(payload.get("spot_fee_rate"))
     futures_rate = _positive_decimal(payload.get("futures_fee_rate"))
     if spot_rate != SPOT_PAPER_FEE_RATE or futures_rate != FUTURES_PAPER_FEE_RATE:
@@ -412,20 +462,90 @@ def opposite_side(side: str) -> str:
     raise CrossBookStateError(f"unhandled side {side!r}")
 
 
+def open_gross_gap(
+    position: Dict[str, Any],
+    spot: ExecutableTop,
+    futures: ExecutableTop,
+) -> Optional[Decimal]:
+    """Gross gap still open on this cross, using the same ratio as entry.
+
+    Buy spot / sell futures uses (futures bid - spot ask) / spot ask.
+    Sell spot / buy futures uses (spot bid - futures ask) / futures ask.
+    None means the book cannot price the gap, and the caller must not flatten.
+    """
+    spot_side = position.get("spot_side")
+    futures_side = position.get("futures_side")
+    if spot_side == "buy" and futures_side == "sell":
+        if spot.ask <= 0:
+            return None
+        return (futures.bid - spot.ask) / spot.ask
+    if spot_side == "sell" and futures_side == "buy":
+        if futures.ask <= 0:
+            return None
+        return (spot.bid - futures.ask) / futures.ask
+    raise CrossBookStateError("open cross sides cannot be flattened")
+
+
+def _shortfall_close(
+    base_qty: Decimal,
+    contracts: Decimal,
+    contract_size: Decimal,
+    spot_size: Decimal,
+    futures_size: Decimal,
+) -> Optional[Tuple[Decimal, Decimal]]:
+    """Lesser top in base, capped at half the open quantity.
+
+    The futures top's base quantity is its size times the contract size already
+    stored on the open. No lot step is applied. None means the quantity is zero
+    or the two legs would not close the same base quantity.
+    """
+    if spot_size <= 0 or futures_size <= 0 or contract_size <= 0:
+        return None
+    futures_base = futures_size * contract_size
+    lesser = spot_size if spot_size <= futures_base else futures_base
+    half = base_qty * Decimal("0.5")
+    if lesser <= 0 or half <= 0:
+        return None
+    close_base = lesser if lesser <= half else half
+    if close_base <= 0 or close_base > half or close_base > spot_size or close_base > futures_base:
+        return None
+    if close_base == futures_base:
+        close_contracts = futures_size
+    elif close_base == half:
+        close_contracts = contracts * Decimal("0.5")
+    else:
+        close_contracts = close_base / contract_size
+    if (
+        close_contracts <= 0
+        or close_contracts > futures_size
+        or close_contracts > contracts
+        or close_base > base_qty
+        or close_contracts * contract_size != close_base
+    ):
+        return None
+    return close_base, close_contracts
+
+
 def flatten_quotes(
     position: Dict[str, Any],
     spot: ExecutableTop,
     futures: ExecutableTop,
 ) -> Optional[Dict[str, Any]]:
-    """Opposite executable tops that can fill the original quantity in full.
+    """Quantity to paper-close on both legs at the opposite executable tops.
 
-    A thinner top is not a partial fill and is not compensated. Both legs stay open.
+    When both tops can fill the open quantity, the close is the full quantity.
+    The half cap does not apply to that full close. Otherwise the close is the
+    lesser top, and it does not exceed half the open quantity. None means the
+    shortfall quantity is zero: the caller closes neither leg.
     """
     spot_side = position.get("spot_side")
     futures_side = position.get("futures_side")
     base_qty = position.get("base_qty")
     contracts = position.get("futures_contracts")
-    if not isinstance(base_qty, Decimal) or not isinstance(contracts, Decimal):
+    contract_size = position.get("contract_size")
+    if not isinstance(base_qty, Decimal) or not isinstance(contracts, Decimal) or not isinstance(contract_size, Decimal):
+        return None
+    if base_qty <= 0 or contracts <= 0 or contract_size <= 0:
         return None
     if spot_side == "buy" and futures_side == "sell":
         spot_exit_side, spot_price, spot_size = "sell", spot.bid, spot.bid_size
@@ -435,13 +555,31 @@ def flatten_quotes(
         futures_exit_side, futures_price, futures_size = "sell", futures.bid, futures.bid_size
     else:
         raise CrossBookStateError("open cross sides cannot be flattened")
-    if spot_size < base_qty or futures_size < contracts:
+    if spot_size <= 0 or futures_size <= 0:
+        return None
+    if spot_size >= base_qty and futures_size >= contracts:
+        close_base: Decimal = base_qty
+        close_contracts: Decimal = contracts
+        full = True
+    else:
+        shortfall = _shortfall_close(base_qty, contracts, contract_size, spot_size, futures_size)
+        if shortfall is None:
+            return None
+        close_base, close_contracts = shortfall
+        full = False
+    if full:
+        if close_base != base_qty or close_contracts != contracts:
+            return None
+    elif close_base > base_qty * Decimal("0.5"):
         return None
     return {
         "spot_exit_side": spot_exit_side,
         "spot_exit_price": spot_price,
         "futures_exit_side": futures_exit_side,
         "futures_exit_price": futures_price,
+        "base_qty": close_base,
+        "futures_contracts": close_contracts,
+        "full": full,
     }
 
 
@@ -479,7 +617,11 @@ class CROSS_BOOK_KRAKEN_SPOT_PRO_PAPER(Strategy):
                 "// executable top of book only",
                 "// buy the cheaper ask, sell the richer bid",
                 "// enter only when (rich_bid - cheap_ask) / cheap_ask > 0.0026 + 0.0005",
-                "// paper-fill both legs or neither",
+                "// paper-fill both legs or neither; do not partial-open",
+                "// flatten only when the open gap is at or under 0.0031",
+                "// full close when both opposite tops can fill the open quantity",
+                "// otherwise both legs close the lesser top, at most half the open quantity",
+                "// zero shortfall or missing quotes: neither leg closes",
                 "// live create refused; no live order",
                 f"// params ignored for sizing: {sorted(params)}",
             ]

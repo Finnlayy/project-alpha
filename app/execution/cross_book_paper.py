@@ -1,8 +1,18 @@
 """
 Paper worker for CROSS_BOOK_KRAKEN_SPOT_PRO_PAPER.
 
-One worker per symbol. Both legs paper-fill or neither leg opens.
-Order effects are SHA-256 deduped. This module never places a live order.
+One worker per symbol. The symbol is a parameter. This module names no pair.
+
+Open both legs for the full shared quantity, or open neither leg.
+Flatten only when the open gap is at or under 0.0031. If that gap is still
+wider, neither leg closes. When both opposite tops can fill the full open
+quantity, paper-close that full quantity on both legs. The half cap does not
+limit a full close. Otherwise paper-close the same shortfall on both legs:
+the lesser top, capped at half the open quantity. A zero shortfall, or missing
+quotes, closes neither leg. No lot step is invented.
+
+Order effects are SHA-256 deduped. Live create is refused. This module never
+places a live order. Paper fills stay inside the paper book.
 """
 from __future__ import annotations
 
@@ -32,6 +42,8 @@ from app.strategies.cross_book_kraken_spot_pro_paper import (
     leg_pnl,
     normalize_symbol,
     open_effect_payload,
+    open_gross_gap,
+    opposite_side,
     position_from_open_payload,
     spot_book_from_depth,
 )
@@ -129,6 +141,14 @@ def _ensure_runtime(engine: Any, row: Dict[str, Any]) -> Dict[str, Any]:
     return engine.lake.get_instance(row["id"]) or row
 
 
+def _position_from_open_effect(open_effect: Dict[str, Any]) -> Dict[str, Any]:
+    remaining_text = open_effect.get("remaining_base_qty")
+    remaining = Decimal(str(remaining_text)) if remaining_text not in (None, "") else None
+    position = position_from_open_payload(open_effect["payload"], open_effect["effect_hash"], remaining)
+    position["entry_epoch_ms"] = int(open_effect.get("created_at") or 0)
+    return position
+
+
 def _restore_open_position(engine: Any, rt: Any) -> None:
     if rt.position is not None:
         return
@@ -137,8 +157,7 @@ def _restore_open_position(engine: Any, rt: Any) -> None:
         return
     if open_effect["instance_id"] != rt.spec["id"]:
         raise CrossBookStateError("unflattened paper cross belongs to another instance")
-    rt.position = position_from_open_payload(open_effect["payload"], open_effect["effect_hash"])
-    rt.position["entry_epoch_ms"] = int(open_effect.get("created_at") or 0)
+    rt.position = _position_from_open_effect(open_effect)
 
 
 def tick_cross_book(engine: Any, rt: Any) -> None:
@@ -234,8 +253,7 @@ def _paper_open(engine: Any, rt: Any, symbol: str, contract: str, decision: Any)
     if not claimed:
         existing = engine.lake.unflattened_cross_open(symbol)
         if existing is not None and existing["effect_hash"] == effect_hash:
-            rt.position = position_from_open_payload(existing["payload"], effect_hash)
-            rt.position["entry_epoch_ms"] = int(existing.get("created_at") or 0)
+            rt.position = _position_from_open_effect(existing)
             rt.last_error = None
             return
         rt.last_error = "duplicate paper open refused"
@@ -258,7 +276,12 @@ def _paper_open(engine: Any, rt: Any, symbol: str, contract: str, decision: Any)
 
 
 def flatten_cross_book(engine: Any, rt: Any, reason: str) -> None:
-    """Paper-flatten both legs at the opposite executable tops, or flatten neither."""
+    """Paper-close both legs, or close neither.
+
+    A full close runs when both opposite tops can fill the open quantity.
+    A shortfall close runs the same quantity on both legs, at most half the
+    open quantity. The open gap must be at or under 0.0031.
+    """
     position = rt.position
     if not position or position.get("kind") != "cross_book":
         return
@@ -285,14 +308,67 @@ def flatten_cross_book(engine: Any, rt: Any, reason: str) -> None:
         rt.last_error = "flatten refused; executable top missing; neither leg closed"
         return
     try:
+        gap = open_gross_gap(position, spot_book, futures_book)
+    except CrossBookStateError as exc:
+        rt.last_error = str(exc)
+        return
+    if gap is None:
+        rt.last_error = "flatten refused; open gap unavailable; neither leg closed"
+        return
+    if gap > FEE_HURDLE:
+        rt.last_error = "flatten refused; open gap still exceeds 0.0031; neither leg closed"
+        return
+    try:
         quotes = flatten_quotes(position, spot_book, futures_book)
     except CrossBookStateError as exc:
         rt.last_error = str(exc)
         return
     if quotes is None:
-        rt.last_error = "flatten refused; a leg cannot paper-fill the full quantity; neither leg closed"
+        rt.last_error = "flatten refused; shortfall quantity is zero; neither leg closed"
+        return
+    refusal = _close_refusal(position, quotes)
+    if refusal is not None:
+        rt.last_error = refusal
         return
     _commit_flatten(engine, rt, position, quotes, reason, spot_book, futures_book)
+
+
+def _close_refusal(position: Dict[str, Any], quotes: Dict[str, Any]) -> Optional[str]:
+    """Refuse a close that would touch one leg, exceed the open, or exceed the half cap."""
+    closed = quotes.get("base_qty")
+    closed_contracts = quotes.get("futures_contracts")
+    open_qty = position.get("base_qty")
+    open_contracts = position.get("futures_contracts")
+    contract_size = position.get("contract_size")
+    if (
+        not isinstance(closed, Decimal)
+        or not isinstance(closed_contracts, Decimal)
+        or not isinstance(open_qty, Decimal)
+        or not isinstance(open_contracts, Decimal)
+        or not isinstance(contract_size, Decimal)
+    ):
+        return "flatten refused; shortfall quantity is zero; neither leg closed"
+    if closed <= 0 or closed_contracts <= 0 or closed > open_qty or closed_contracts > open_contracts:
+        return "flatten refused; shortfall quantity is zero; neither leg closed"
+    if closed_contracts * contract_size != closed:
+        return "flatten refused; legs would close different quantities; neither leg closed"
+    spot_exit = quotes.get("spot_exit_side")
+    futures_exit = quotes.get("futures_exit_side")
+    try:
+        spot_ok = spot_exit == opposite_side(str(position.get("spot_side")))
+        futures_ok = futures_exit == opposite_side(str(position.get("futures_side")))
+    except CrossBookStateError:
+        return "flatten refused; open cross sides cannot be flattened; neither leg closed"
+    if not spot_ok or not futures_ok:
+        return "flatten refused; legs would close different quantities; neither leg closed"
+    full = quotes.get("full") is True
+    half = open_qty * Decimal("0.5")
+    if full:
+        if closed != open_qty or closed_contracts != open_contracts:
+            return "flatten refused; full close quantity does not match the open quantity; neither leg closed"
+    elif closed > half:
+        return "flatten refused; shortfall exceeds half the open quantity; neither leg closed"
+    return None
 
 
 def _commit_flatten(
@@ -309,6 +385,12 @@ def _commit_flatten(
     if not isinstance(open_payload, dict) or not isinstance(open_hash, str):
         rt.last_error = "flatten refused; open effect payload missing"
         return
+    closed = quotes["base_qty"]
+    closed_contracts = quotes["futures_contracts"]
+    open_qty = position["base_qty"]
+    if not isinstance(closed, Decimal) or not isinstance(open_qty, Decimal) or open_qty <= 0:
+        rt.last_error = "flatten refused; shortfall quantity is zero; neither leg closed"
+        return
     payload = flatten_effect_payload(
         open_payload,
         open_hash,
@@ -316,17 +398,21 @@ def _commit_flatten(
         quotes["spot_exit_price"],
         quotes["futures_exit_side"],
         quotes["futures_exit_price"],
+        closed,
+        closed_contracts,
+        open_qty,
     )
     effect_hash = effect_sha256(payload)
-    spot_pnl = leg_pnl(position["spot_side"], position["spot_entry"], quotes["spot_exit_price"], position["base_qty"])
+    spot_pnl = leg_pnl(position["spot_side"], position["spot_entry"], quotes["spot_exit_price"], closed)
     futures_pnl = leg_pnl(
-        position["futures_side"], position["futures_entry"], quotes["futures_exit_price"], position["base_qty"]
+        position["futures_side"], position["futures_entry"], quotes["futures_exit_price"], closed
     )
-    exit_fee = leg_fee(quotes["spot_exit_price"], position["base_qty"], SPOT_PAPER_FEE_RATE) + leg_fee(
-        quotes["futures_exit_price"], position["base_qty"], FUTURES_PAPER_FEE_RATE
+    exit_fee = leg_fee(quotes["spot_exit_price"], closed, SPOT_PAPER_FEE_RATE) + leg_fee(
+        quotes["futures_exit_price"], closed, FUTURES_PAPER_FEE_RATE
     )
+    entry_slice = position["entry_fee"] * (closed / open_qty)
     gross = spot_pnl + futures_pnl
-    net = gross - position["entry_fee"] - exit_fee
+    net = gross - entry_slice - exit_fee
     now = time.time()
     opened_ms = int(position.get("entry_epoch_ms") or 0)
     trade = {
@@ -342,9 +428,9 @@ def _commit_flatten(
         "ts_close": int(now * 1000),
         "entry_price": float(position["spot_entry"]),
         "exit_price": float(quotes["spot_exit_price"]),
-        "amount": float(position["base_qty"]),
-        "notional_usd": float(position["spot_entry"] * position["base_qty"] + position["futures_entry"] * position["base_qty"]),
-        "fee_usd": float(position["entry_fee"] + exit_fee),
+        "amount": float(closed),
+        "notional_usd": float(position["spot_entry"] * closed + position["futures_entry"] * closed),
+        "fee_usd": float(entry_slice + exit_fee),
         "funding_usd": 0.0,
         "gross_pnl": float(gross),
         "net_pnl": float(net),
@@ -360,25 +446,33 @@ def _commit_flatten(
         rt.last_error = "flatten effect refused"
         return
     rt.position = None
+    try:
+        _restore_open_position(engine, rt)
+    except CrossBookStateError as exc:
+        rt.last_error = str(exc)
+        return
     rt.last_error = None
     rt.last_mark = float(spot_book.bid)
     rt.last_signal = {
         "enter": False,
         "flattened": True,
+        "full_close": quotes.get("full") is True and rt.position is None,
         "reason": reason,
+        "closed_base_qty": payload["base_qty"],
         "spot_exit": payload["spot_exit_price"],
         "futures_exit": payload["futures_exit_price"],
         "effect": effect_hash,
         "spot_bid": format(spot_book.bid, "f"),
         "futures_bid": format(futures_book.bid, "f"),
     }
-    engine.bus.emit(
-        "trade",
-        "CrossBookPaper",
-        (
-            f"FLATTEN CROSS {payload['symbol']} spot {payload['spot_exit_side']} @ {payload['spot_exit_price']} "
-            f"futures {payload['futures_exit_side']} @ {payload['futures_exit_price']} "
-            f"net={float(net):.8f} effect={effect_hash} trace={TRACE_ID}"
-        ),
-        rt.spec["id"],
-    )
+    if committed:
+        engine.bus.emit(
+            "trade",
+            "CrossBookPaper",
+            (
+                f"FLATTEN CROSS {payload['symbol']} spot {payload['spot_exit_side']} @ {payload['spot_exit_price']} "
+                f"futures {payload['futures_exit_side']} @ {payload['futures_exit_price']} "
+                f"qty={payload['base_qty']} net={float(net):.8f} effect={effect_hash} trace={TRACE_ID}"
+            ),
+            rt.spec["id"],
+        )
