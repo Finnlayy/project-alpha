@@ -1,7 +1,17 @@
-"""CROSS_BOOK_KRAKEN_SPOT_PRO_PAPER: registration, paper start, live refusal, book cross."""
+"""CROSS_BOOK_KRAKEN_SPOT_PRO_PAPER tests.
+
+Flatten contract: both legs paper-close the full open quantity when both
+opposite tops can fill it. The half cap does not limit that full close.
+Otherwise both legs paper-close the same shortfall, the lesser top, and never
+more than half the open quantity. A zero shortfall or missing quotes closes
+neither leg. An open gap still above 0.0031 does not flatten. The open stays
+all-or-nothing. Live create stays refused. No network and no exchange order.
+"""
 from __future__ import annotations
 
 import asyncio
+import inspect
+import json
 import os
 import tempfile
 from decimal import Decimal
@@ -12,6 +22,7 @@ from fastapi import HTTPException
 
 from app.api.routes import strategies_create, strategies_update
 from app.config import Settings
+from app.execution.cross_book_paper import tick_cross_book
 from app.execution.trading_engine import TradingEngine
 from app.kraken.futures_client import KrakenFuturesClient
 from app.kraken.spot_client import KrakenError, KrakenSpotClient
@@ -30,9 +41,11 @@ from app.strategies.cross_book_kraken_spot_pro_paper import (
     effect_sha256,
     evaluate_cross,
     executable_top,
+    flatten_quotes,
     futures_book_from_orderbook,
     normalize_symbol,
     open_effect_payload,
+    open_gross_gap,
     spot_book_from_depth,
 )
 from app.strategies.registry import REGISTRY, get_strategy
@@ -266,8 +279,6 @@ def test_paper_open_requires_both_books_and_dedups(engine_env):
     assert rt.position is None
 
     books.fail_futures = True
-    from app.execution.cross_book_paper import tick_cross_book
-
     tick_cross_book(engine, rt)
     assert rt.position is None
     assert "futures book unavailable" in (rt.last_error or "")
@@ -306,8 +317,6 @@ def test_flatten_closes_both_legs_or_neither(engine_env):
         "symbol": "PF_XBTUSD",
         "orderBook": {"bids": [[100.40, 1]], "asks": [[100.80, 2]]},
     }
-    from app.execution.cross_book_paper import tick_cross_book
-
     tick_cross_book(engine, rt)
     assert rt.position is not None
 
@@ -395,8 +404,6 @@ def test_stopped_open_cross_reuses_the_same_worker(engine_env):
         "symbol": "PF_XBTUSD",
         "orderBook": {"bids": [[100.40, 1]], "asks": [[100.80, 2]]},
     }
-    from app.execution.cross_book_paper import tick_cross_book
-
     tick_cross_book(engine, rt)
     assert rt.position is not None
     books.futures = {
@@ -411,6 +418,315 @@ def test_stopped_open_cross_reuses_the_same_worker(engine_env):
     assert again["id"] == row["id"]
     assert again["status"] == "active"
     assert engine.instances[row["id"]].position["effect_hash"] == rt.position["effect_hash"]
+
+
+def _spot_book(bid, bid_size, ask, ask_size, native="XBTUSD"):
+    return {
+        "error": [],
+        "result": {native: {"bids": [[bid, bid_size, 1]], "asks": [[ask, ask_size, 1]]}},
+    }
+
+
+def _futures_book(bid, bid_size, ask, ask_size, symbol="PF_XBTUSD"):
+    return {
+        "result": "success",
+        "symbol": symbol,
+        "orderBook": {"bids": [[bid, bid_size]], "asks": [[ask, ask_size]]},
+    }
+
+
+def _open_cross(engine, books, qty="2"):
+    row = engine.start_instance(STRATEGY_NAME, "cross", "BTC/USD", 1, {}, "paper")
+    rt = _quiesce(engine, row["id"])
+    books.spot = _spot_book("99", qty, "100", qty)
+    books.futures = _futures_book("100.40", qty, "100.80", qty)
+    tick_cross_book(engine, rt)
+    assert rt.position is not None
+    assert rt.position["base_qty"] == Decimal(qty)
+    assert rt.position["futures_contracts"] == Decimal(qty)
+    return row, rt
+
+
+def _exit_books(books, bid_size, ask_size, futures_bid="100.00"):
+    """Buy-spot cross exit books. Gap uses futures bid against spot ask 100.
+
+    The futures ask stays above the bid so the book is not crossed. Closing a
+    short futures leg buys that ask.
+    """
+    books.spot = _spot_book("99.50", bid_size, "100", "2")
+    books.futures = _futures_book(futures_bid, "2", "101", ask_size)
+
+
+def _flatten_payloads(lake, symbol="BTC/USD"):
+    rows = lake._conn.execute(
+        "SELECT payload_json FROM effect_dedup WHERE symbol=? AND action='flatten' ORDER BY created_at",
+        [symbol],
+    ).fetchall()
+    return [json.loads(row[0]) for row in rows]
+
+
+def _order_guard(engine, books):
+    calls = {"n": 0}
+
+    def _refuse(*_args, **_kwargs):
+        calls["n"] += 1
+        raise AssertionError("exchange order refused")
+
+    engine.spot.add_order = _refuse
+    books.send_order = _refuse
+    return calls
+
+
+def test_module_does_not_bind_a_pair():
+    import app.execution.cross_book_paper as worker
+    import app.strategies.cross_book_kraken_spot_pro_paper as strategy
+
+    for module in (strategy, worker):
+        source = inspect.getsource(module)
+        for pair in ("BTC", "LTC", "ETH", "XBT", "XRP", "SOL"):
+            assert pair not in source
+
+
+def test_open_stays_all_or_nothing():
+    refused = evaluate_cross(
+        _top("99", "1", "100", "0"),
+        _top("110", "1", "111", "1"),
+        Decimal("1"),
+    )
+    assert refused.enter is False
+    assert refused.base_qty is None
+    assert refused.spot_side is None
+    assert refused.futures_side is None
+    entered = evaluate_cross(
+        _top("99", "5", "100", "1.5"),
+        _top("100.40", "1", "100.80", "4"),
+        Decimal("1"),
+    )
+    assert entered.enter is True
+    assert entered.spot_side == "buy"
+    assert entered.futures_side == "sell"
+    assert entered.base_qty == Decimal("1")
+    assert entered.futures_contracts == Decimal("1")
+
+
+def test_flatten_quotes_full_close_is_not_capped_at_half():
+    position = {
+        "spot_side": "sell",
+        "futures_side": "buy",
+        "base_qty": Decimal("4"),
+        "futures_contracts": Decimal("2"),
+        "contract_size": Decimal("2"),
+    }
+    quotes = flatten_quotes(
+        position,
+        _top("10", "9", "11", "9"),
+        _top("9", "5", "9.5", "4"),
+    )
+    assert quotes is not None
+    assert quotes["full"] is True
+    assert quotes["base_qty"] == Decimal("4")
+    assert quotes["futures_contracts"] == Decimal("2")
+    assert quotes["spot_exit_side"] == "buy"
+    assert quotes["futures_exit_side"] == "sell"
+
+
+def test_flatten_quotes_shortfall_is_the_lesser_top_capped_at_half():
+    position = {
+        "spot_side": "sell",
+        "futures_side": "buy",
+        "base_qty": Decimal("4"),
+        "futures_contracts": Decimal("2"),
+        "contract_size": Decimal("2"),
+    }
+    both_thin = flatten_quotes(
+        position,
+        _top("10", "4", "11", "1"),
+        _top("9", "1.5", "9.5", "1"),
+    )
+    assert both_thin is not None
+    assert both_thin["full"] is False
+    assert both_thin["base_qty"] == Decimal("1")
+    assert both_thin["futures_contracts"] == Decimal("0.5")
+    above_half = flatten_quotes(
+        position,
+        _top("10", "4", "11", "3"),
+        _top("9", "1.5", "9.5", "1"),
+    )
+    assert above_half is not None
+    assert above_half["full"] is False
+    assert above_half["base_qty"] == Decimal("2")
+    assert above_half["futures_contracts"] == Decimal("1")
+    assert above_half["base_qty"] == position["base_qty"] * Decimal("0.5")
+    zero = flatten_quotes(
+        position,
+        _top("10", "4", "11", "0"),
+        _top("9", "2", "9.5", "1"),
+    )
+    assert zero is None
+
+
+def test_full_tops_paper_close_the_full_quantity_on_both_legs(engine_env):
+    engine, lake, books = engine_env
+    calls = _order_guard(engine, books)
+    row, rt = _open_cross(engine, books, "2")
+    opened = rt.position["effect_hash"]
+    _exit_books(books, "2", "2", futures_bid="100.00")
+    engine._close_position(rt, "GAP_COLLAPSED")
+    assert calls["n"] == 0
+    assert rt.position is None
+    assert rt.last_signal["full_close"] is True
+    assert rt.last_signal["closed_base_qty"] == "2"
+    trades = lake.trades_for(instance_id=row["id"])
+    assert len(trades) == 1
+    assert trades[0]["mode"] == "paper"
+    assert trades[0]["side"] == "cross"
+    assert Decimal(str(trades[0]["amount"])) == Decimal("2")
+    payloads = _flatten_payloads(lake)
+    assert len(payloads) == 1
+    assert payloads[0]["base_qty"] == "2"
+    assert payloads[0]["futures_contracts"] == "2"
+    assert payloads[0]["spot_exit_side"] == "sell"
+    assert payloads[0]["futures_exit_side"] == "buy"
+    assert payloads[0]["opens_effect_hash"] == opened
+    assert lake.unflattened_cross_open("BTC/USD") is None
+
+
+def test_thinner_tops_paper_close_the_lesser_quantity_on_both_legs(engine_env):
+    engine, lake, books = engine_env
+    calls = _order_guard(engine, books)
+    row, rt = _open_cross(engine, books, "2")
+    opened = rt.position["effect_hash"]
+    _exit_books(books, "0.4", "0.7", futures_bid="100.00")
+    engine._close_position(rt, "GAP_COLLAPSED")
+    assert calls["n"] == 0
+    assert rt.position is not None
+    assert rt.position["base_qty"] == Decimal("1.6")
+    assert rt.position["futures_contracts"] == Decimal("1.6")
+    assert rt.position["futures_contracts"] * rt.position["contract_size"] == rt.position["base_qty"]
+    assert rt.position["effect_hash"] == opened
+    trades = lake.trades_for(instance_id=row["id"])
+    assert len(trades) == 1
+    assert Decimal(str(trades[0]["amount"])) == Decimal("0.4")
+    payloads = _flatten_payloads(lake)
+    assert len(payloads) == 1
+    assert payloads[0]["base_qty"] == "0.4"
+    assert payloads[0]["futures_contracts"] == "0.4"
+    assert payloads[0]["spot_exit_side"] == "sell"
+    assert payloads[0]["futures_exit_side"] == "buy"
+    assert Decimal(payloads[0]["base_qty"]) <= Decimal("2") * Decimal("0.5")
+    rt.position = None
+    tick_cross_book(engine, rt)
+    assert rt.position is not None
+    assert rt.position["effect_hash"] == opened
+    assert rt.position["base_qty"] == Decimal("1.6")
+    assert rt.position["futures_contracts"] == Decimal("1.6")
+
+
+def test_shortfall_above_half_closes_only_half_on_both_legs(engine_env):
+    engine, lake, books = engine_env
+    calls = _order_guard(engine, books)
+    row, rt = _open_cross(engine, books, "2")
+    _exit_books(books, "1.5", "1.8", futures_bid="100.00")
+    engine._close_position(rt, "GAP_COLLAPSED")
+    assert calls["n"] == 0
+    assert rt.position is not None
+    assert rt.position["base_qty"] == Decimal("1")
+    assert rt.position["futures_contracts"] == Decimal("1")
+    trades = lake.trades_for(instance_id=row["id"])
+    assert len(trades) == 1
+    assert Decimal(str(trades[0]["amount"])) == Decimal("1")
+    payloads = _flatten_payloads(lake)
+    assert Decimal(payloads[0]["base_qty"]) == Decimal("1")
+    assert Decimal(payloads[0]["futures_contracts"]) == Decimal("1")
+    assert payloads[0]["spot_exit_side"] == "sell"
+    assert payloads[0]["futures_exit_side"] == "buy"
+    assert Decimal(payloads[0]["base_qty"]) == Decimal("2") * Decimal("0.5")
+
+
+def test_zero_shortfall_or_missing_quotes_closes_neither_leg(engine_env):
+    engine, lake, books = engine_env
+    calls = _order_guard(engine, books)
+    row, rt = _open_cross(engine, books, "2")
+    opened_qty = rt.position["base_qty"]
+    books.spot = {"error": [], "result": {}}
+    engine._close_position(rt, "GAP_COLLAPSED")
+    assert calls["n"] == 0
+    assert rt.position is not None
+    assert rt.position["base_qty"] == opened_qty
+    assert lake.trades_for(instance_id=row["id"]) == []
+    assert rt.last_error == "flatten refused; executable top missing; neither leg closed"
+
+    _exit_books(books, "2", "2", futures_bid="100.00")
+    rt.position["contract_size"] = Decimal("0")
+    engine._close_position(rt, "GAP_COLLAPSED")
+    assert rt.position["base_qty"] == opened_qty
+    assert rt.position["futures_contracts"] == Decimal("2")
+    assert lake.trades_for(instance_id=row["id"]) == []
+    assert rt.last_error == "flatten refused; shortfall quantity is zero; neither leg closed"
+    assert _flatten_payloads(lake) == []
+
+
+def test_open_gap_above_hurdle_does_not_flatten(engine_env):
+    engine, lake, books = engine_env
+    assert FEE_HURDLE == Decimal("0.0031")
+    row, rt = _open_cross(engine, books, "2")
+    _exit_books(books, "2", "2", futures_bid="100.32")
+    gap = open_gross_gap(rt.position, _top("99.50", "2", "100", "2"), _top("100.32", "2", "100.50", "2"))
+    assert gap == Decimal("0.0032")
+    assert gap > FEE_HURDLE
+    engine._close_position(rt, "GAP_COLLAPSED")
+    assert rt.position is not None
+    assert rt.position["base_qty"] == Decimal("2")
+    assert lake.trades_for(instance_id=row["id"]) == []
+    assert rt.last_error == "flatten refused; open gap still exceeds 0.0031; neither leg closed"
+
+    _exit_books(books, "2", "2", futures_bid="100.31")
+    equal_gap = open_gross_gap(rt.position, _top("99.50", "2", "100", "2"), _top("100.31", "2", "100.50", "2"))
+    assert equal_gap == FEE_HURDLE
+    engine._close_position(rt, "GAP_COLLAPSED")
+    assert rt.position is None
+    assert Decimal(str(lake.trades_for(instance_id=row["id"])[0]["amount"])) == Decimal("2")
+
+
+def test_flatten_never_closes_one_leg(engine_env):
+    engine, lake, books = engine_env
+    calls = _order_guard(engine, books)
+    row, rt = _open_cross(engine, books, "2")
+    books.spot = _spot_book("99.50", "2", "100", "2")
+    books.futures = _futures_book("100.00", "2", "100.20", "0")
+    engine._close_position(rt, "GAP_COLLAPSED")
+    assert calls["n"] == 0
+    assert rt.position is not None
+    assert rt.position["base_qty"] == Decimal("2")
+    assert rt.position["futures_contracts"] == Decimal("2")
+    assert lake.trades_for(instance_id=row["id"]) == []
+    assert "neither leg closed" in (rt.last_error or "")
+
+    _exit_books(books, "0.3", "0.9", futures_bid="100.00")
+    engine._close_position(rt, "GAP_COLLAPSED")
+    assert rt.position is not None
+    assert rt.position["base_qty"] == Decimal("1.7")
+    assert rt.position["futures_contracts"] == Decimal("1.7")
+    payloads = _flatten_payloads(lake)
+    assert len(payloads) == 1
+    assert payloads[0]["spot_exit_side"] == "sell"
+    assert payloads[0]["futures_exit_side"] == "buy"
+    assert payloads[0]["base_qty"] == payloads[0]["futures_contracts"] == "0.3"
+    assert len(lake.trades_for(instance_id=row["id"])) == 1
+
+
+def test_live_flatten_is_still_refused(engine_env):
+    engine, lake, books = engine_env
+    calls = _order_guard(engine, books)
+    row, rt = _open_cross(engine, books, "2")
+    _exit_books(books, "2", "2", futures_bid="100.00")
+    rt.spec["mode"] = "live"
+    engine._close_position(rt, "GAP_COLLAPSED")
+    assert calls["n"] == 0
+    assert rt.position is not None
+    assert rt.position["base_qty"] == Decimal("2")
+    assert lake.trades_for(instance_id=row["id"]) == []
+    assert rt.last_error == "CROSS_BOOK_KRAKEN_SPOT_PRO_PAPER refuses live create"
 
 
 def test_native_pair_mapping_stays_on_the_kraken_clients():
