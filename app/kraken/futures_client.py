@@ -1,3 +1,8 @@
+# Trace cros-ltcusd-955960103 (paper CROSS_BOOK): symbol_to_contract binds
+# LTC/USD only to an exact PF_LTCUSD instrument. PF_XLTUSD is absent and is
+# rejected. PI_LTCUSD is not selected. Zero or multiple exact hits leave the
+# contract unbound so that worker stays paused. This file does not place
+# orders and does not init or reset paper state.
 """
 Real Kraken Futures (Pro) REST API v3 client (public + private).
 
@@ -35,7 +40,7 @@ from urllib.parse import urlencode
 import httpx
 
 from app.config import KrakenCredentials, Settings
-from app.kraken.spot_client import KrakenError
+from app.kraken.spot_client import KrakenError, PairUnbound
 
 
 class KrakenFuturesClient:
@@ -318,18 +323,73 @@ class KrakenFuturesClient:
         return self.fills()
 
     # ------------------------------------------------------------------ util
+    # Present on GET /derivatives/api/v3/instruments. PF_XLTUSD is not.
+    _LTC_FUTURES_EXACT = "PF_LTCUSD"
+
+    @staticmethod
+    def _instrument_names(instruments: List[Any]) -> List[str]:
+        # Exact instrument symbols only. Peter confirmed PF_LTCUSD is present,
+        # PF_XLTUSD is absent, and PI_LTCUSD shows up in a fuzzy LTC search.
+        names: List[str] = []
+        for item in instruments:
+            if isinstance(item, str):
+                names.append(item.strip().upper())
+        return names
+
+    @staticmethod
+    def _bind_ltc_contract(symbol: str, instruments: Optional[List[Any]] = None) -> str:
+        """Return PF_LTCUSD only when that symbol appears exactly once.
+
+        PI_LTCUSD and PF_XLTUSD are not exact hits. Any other count leaves
+        cros-ltcusd-955960103 unbound.
+        """
+        token = (symbol or "").strip().upper()
+        if token in {"PF_XLTUSD", "XLTUSD", "XLT/USD", "PI_LTCUSD"}:
+            raise PairUnbound(
+                "rejected non-exact LTC futures symbol; paper worker cros-ltcusd-955960103 stays paused"
+            )
+        base, _, quote = (symbol or "").partition("/")
+        base_u = base.strip().upper()
+        quote_u = quote.strip().upper()
+        exact_request = token in {"LTC/USD", "LTCUSD", "PF_LTCUSD"} or (base_u == "LTC" and quote_u == "USD")
+        if not exact_request:
+            raise PairUnbound(
+                "LTC futures lookup had no exact PF_LTCUSD match; paper worker cros-ltcusd-955960103 stays paused"
+            )
+        catalog: List[Any] = instruments if instruments is not None else [KrakenFuturesClient._LTC_FUTURES_EXACT]
+        exact = [name for name in KrakenFuturesClient._instrument_names(catalog) if name == "PF_LTCUSD"]
+        if len(exact) != 1:
+            raise PairUnbound(
+                f"LTC/USD futures lookup hit {len(exact)} PF_LTCUSD rows; paper worker cros-ltcusd-955960103 stays paused"
+            )
+        return KrakenFuturesClient._LTC_FUTURES_EXACT
+
     @staticmethod
     def symbol_to_contract(symbol: str) -> str:
-        """'BTC/USD' -> 'PF_XBTUSD' · 'ETH/USD' -> 'PF_ETHUSD'.
+        """'BTC/USD' -> 'PF_XBTUSD' · 'ETH/USD' -> 'PF_ETHUSD' · 'LTC/USD' -> 'PF_LTCUSD'.
 
         Targets current perpetual (flexible futures) symbols. Case-insensitive
         on the wire; uppercase is canonical.
+
+        LTC/USD is bound only to an exact PF_LTCUSD match. PF_XLTUSD and
+        PI_LTCUSD are not returned.
         """
-        base, _, quote = symbol.partition("/")
-        mapping = {"BTC": "XBT", "DOGE": "XDG", "LTC": "XLT"}
-        b = mapping.get(base.strip().upper(), base.strip().upper())
+        token = (symbol or "").strip().upper()
+        base, _, quote = (symbol or "").partition("/")
+        base_u = base.strip().upper()
+        if base_u in {"LTC", "XLT"} or token in {
+            "LTC/USD", "LTCUSD", "PF_LTCUSD", "PF_XLTUSD", "XLTUSD", "XLT/USD", "PI_LTCUSD",
+        }:
+            return KrakenFuturesClient._bind_ltc_contract(symbol)
+        mapping = {"BTC": "XBT", "DOGE": "XDG"}
+        b = mapping.get(base_u, base_u)
         q = quote.strip().upper() or "USD"
-        return f"PF_{b}{q}"
+        contract = f"PF_{b}{q}"
+        if contract in {"PF_XLTUSD", "PI_LTCUSD"}:
+            raise PairUnbound(
+                "rejected non-exact LTC futures symbol; paper worker cros-ltcusd-955960103 stays paused"
+            )
+        return contract
 
     @staticmethod
     def contract_to_symbol(contract: str) -> str:
@@ -341,7 +401,7 @@ class KrakenFuturesClient:
                 break
         if core.startswith("FI_"):  # dated: FI_XBTUSD_260327
             core = core[3:].rsplit("_", 1)[0]
-        rev = {"XBT": "BTC", "XDG": "DOGE", "XLT": "LTC"}
+        rev = {"XBT": "BTC", "XDG": "DOGE"}
         for q in ("USD", "EUR", "GBP", "USDT", "USDC"):
             if core.endswith(q) and len(core) > len(q):
                 b = core[: -len(q)]

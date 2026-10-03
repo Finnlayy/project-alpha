@@ -1,3 +1,7 @@
+# Trace cros-ltcusd-955960103 (paper CROSS_BOOK): these tests check that
+# LTC/USD binds only to XLTCZUSD and PF_LTCUSD when the lookup is one exact
+# hit. XLTUSD, PF_XLTUSD, and PI_LTCUSD are not selected. Zero or multiple
+# hits stay unbound. Tests do not place orders or init or reset paper state.
 """
 Conformance tests for the Kraken API signing schemes.
 
@@ -18,7 +22,7 @@ import hmac
 
 from app.config import Settings
 from app.kraken.futures_client import KrakenFuturesClient
-from app.kraken.spot_client import KrakenSpotClient
+from app.kraken.spot_client import KrakenSpotClient, PairUnbound
 
 
 # ---------------------------------------------------------------- Spot API-2
@@ -59,9 +63,48 @@ def test_spot_pair_mapping():
     assert KrakenSpotClient.pair_to_native("ETH/USD") == "ETHUSD"
     assert KrakenSpotClient.pair_to_native("ETH/EUR") == "ETHZEUR"
     assert KrakenSpotClient.pair_to_native("DOGE/USD") == "XDGUSD"
+    assert "LTC" not in KrakenSpotClient._BASE
+    assert "XLT" not in KrakenSpotClient._BASE.values()
     # Round-trips
-    for symbol in ("BTC/USD", "ETH/USD", "ETH/EUR", "XRP/USD", "SOL/USD", "BTC/EUR"):
+    for symbol in ("BTC/USD", "ETH/USD", "ETH/EUR", "XRP/USD", "SOL/USD", "BTC/EUR", "LTC/USD"):
         assert KrakenSpotClient.native_to_pair(KrakenSpotClient.pair_to_native(symbol)) == symbol
+
+
+def _confirmed_ltc_spot_row():
+    return dict(KrakenSpotClient._LTC_SPOT_ROW)
+
+
+def test_ltc_usd_spot_binds_only_exact_xltczusd():
+    # The confirmed AssetPairs row is the only default hit.
+    assert KrakenSpotClient.pair_to_native("LTC/USD") == "XLTCZUSD"
+    assert KrakenSpotClient.pair_to_native("LTCUSD") == "XLTCZUSD"
+    assert KrakenSpotClient.pair_to_native("XLTCZUSD") == "XLTCZUSD"
+    assert KrakenSpotClient.pair_to_native("LTC/USD") != "XLTUSD"
+    row = _confirmed_ltc_spot_row()
+    # A rejected XLTUSD key next to the one exact row is not a second hit.
+    assert KrakenSpotClient._bind_ltc_spot("LTC/USD", rows=[row, {"key": "XLTUSD"}]) == "XLTCZUSD"
+
+
+def test_ltc_usd_spot_unbound_when_not_unique():
+    row = _confirmed_ltc_spot_row()
+    cases = (
+        [],
+        [row, dict(row)],
+        [{"key": "XLTUSD"}],
+        [dict(row, status="")],
+    )
+    for rows in cases:
+        try:
+            KrakenSpotClient._bind_ltc_spot("LTC/USD", rows=rows)
+            raise AssertionError(rows)
+        except PairUnbound:
+            pass
+    for symbol in ("XLTUSD", "XLT/USD", "LTC/EUR"):
+        try:
+            KrakenSpotClient.pair_to_native(symbol)
+            raise AssertionError(symbol)
+        except PairUnbound:
+            pass
 
 
 # ---------------------------------------------------------------- Futures
@@ -99,10 +142,42 @@ def test_futures_symbol_mapping():
     assert KrakenFuturesClient.symbol_to_contract("BTC/USD") == "PF_XBTUSD"
     assert KrakenFuturesClient.symbol_to_contract("ETH/USD") == "PF_ETHUSD"
     assert KrakenFuturesClient.symbol_to_contract("DOGE/USD") == "PF_XDGUSD"
+    assert KrakenFuturesClient.symbol_to_contract("LTC/USD") == "PF_LTCUSD"
     # round-trips
-    for symbol in ("BTC/USD", "ETH/USD", "DOGE/USD", "SOL/USD"):
+    for symbol in ("BTC/USD", "ETH/USD", "DOGE/USD", "SOL/USD", "LTC/USD"):
         assert KrakenFuturesClient.contract_to_symbol(
             KrakenFuturesClient.symbol_to_contract(symbol)) == symbol
+
+
+def test_ltc_usd_futures_binds_only_exact_pf_ltcusd():
+    assert KrakenFuturesClient.symbol_to_contract("LTC/USD") == "PF_LTCUSD"
+    assert KrakenFuturesClient.symbol_to_contract("LTCUSD") == "PF_LTCUSD"
+    assert KrakenFuturesClient.symbol_to_contract("PF_LTCUSD") == "PF_LTCUSD"
+    # Fuzzy LTC results include PI_LTCUSD. Only the exact PF_ symbol counts.
+    fuzzy = ["PI_LTCUSD", "PF_XLTUSD", "PF_LTCUSD"]
+    assert KrakenFuturesClient._bind_ltc_contract("LTC/USD", instruments=fuzzy) == "PF_LTCUSD"
+
+
+def test_ltc_usd_futures_unbound_when_not_unique():
+    cases = (
+        [],
+        ["PI_LTCUSD"],
+        ["PF_XLTUSD"],
+        ["PI_LTCUSD", "PF_XLTUSD"],
+        ["PF_LTCUSD", "PF_LTCUSD"],
+    )
+    for instruments in cases:
+        try:
+            KrakenFuturesClient._bind_ltc_contract("LTC/USD", instruments=instruments)
+            raise AssertionError(instruments)
+        except PairUnbound:
+            pass
+    for symbol in ("PF_XLTUSD", "PI_LTCUSD", "XLT/USD", "LTC/EUR"):
+        try:
+            KrakenFuturesClient.symbol_to_contract(symbol)
+            raise AssertionError(symbol)
+        except PairUnbound:
+            pass
 
 
 def test_client_requires_credentials_for_private():

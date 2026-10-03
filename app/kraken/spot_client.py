@@ -1,3 +1,8 @@
+# Trace cros-ltcusd-955960103 (paper CROSS_BOOK): pair_to_native binds LTC/USD
+# only to the one AssetPairs row Peter confirmed (key XLTCZUSD, altname LTCUSD,
+# wsname LTC/USD, base XLTC, quote ZUSD, status online). XLTUSD is rejected.
+# Zero or multiple exact hits leave the pair unbound so that worker stays paused.
+# This file does not place orders and does not init or reset paper state.
 """
 Real Kraken Spot REST client (public + private).
 
@@ -34,6 +39,13 @@ class KrakenError(RuntimeError):
         super().__init__(error)
         self.http_status = http_status
         self.errors = errors or []
+
+
+class PairUnbound(KrakenError):
+    """Lookup was not one exact pair. No substitute pair is returned.
+
+    Paper CROSS_BOOK worker cros-ltcusd-955960103 stays paused.
+    """
 
 
 class KrakenSpotClient:
@@ -255,24 +267,97 @@ class KrakenSpotClient:
         return self._request("POST", "/0/private/TradesHistory", params, private=True)
 
     # ------------------------------------------------------------------ util
-    _BASE = {"BTC": "XBT", "DOGE": "XDG", "LTC": "XLT", "XETH": "ETH"}
+    # LTC is not in this map. The old LTC -> XLT entry made LTC/USD into XLTUSD.
+    _BASE = {"BTC": "XBT", "DOGE": "XDG", "XETH": "ETH"}
     _QUOTE = {"USD": "USD", "EUR": "ZEUR", "GBP": "ZGBP", "JPY": "ZJPY"}
+
+    # One row from GET /0/public/AssetPairs?pair=LTCUSD. No other spot pair is recorded.
+    _LTC_SPOT_ROW = {
+        "key": "XLTCZUSD",
+        "altname": "LTCUSD",
+        "wsname": "LTC/USD",
+        "base": "XLTC",
+        "quote": "ZUSD",
+        "status": "online",
+    }
+    _LTC_SPOT_FIELDS = ("key", "altname", "wsname", "base", "quote", "status")
+    _REJECTED_SPOT_KEYS = frozenset({"XLTUSD"})
+
+    @staticmethod
+    def _exact_ltc_spot_hits(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Rows that equal the single confirmed LTC/USD AssetPairs row."""
+        confirmed = KrakenSpotClient._LTC_SPOT_ROW
+        hits: List[Dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            key = str(row.get("key", "")).upper()
+            if key in KrakenSpotClient._REJECTED_SPOT_KEYS:
+                continue
+            if all(str(row.get(field, "")) == confirmed[field] for field in KrakenSpotClient._LTC_SPOT_FIELDS):
+                hits.append(row)
+        return hits
+
+    @staticmethod
+    def _bind_ltc_spot(symbol: str, rows: Optional[List[Dict[str, Any]]] = None) -> str:
+        """Return XLTCZUSD only when exactly one confirmed row matches.
+
+        Any other count leaves cros-ltcusd-955960103 unbound. XLTUSD is never returned.
+        """
+        token = (symbol or "").strip().upper()
+        if token in {"XLTUSD", "XLT/USD"}:
+            raise PairUnbound(
+                "rejected XLTUSD; paper worker cros-ltcusd-955960103 stays paused"
+            )
+        base, _, quote = (symbol or "").partition("/")
+        base_u = base.strip().upper()
+        quote_u = quote.strip().upper()
+        exact_request = token in {"LTC/USD", "LTCUSD", "XLTCZUSD"} or (base_u == "LTC" and quote_u == "USD")
+        if not exact_request:
+            raise PairUnbound(
+                "LTC spot lookup had no exact LTC/USD row; paper worker cros-ltcusd-955960103 stays paused"
+            )
+        catalog = rows if rows is not None else [dict(KrakenSpotClient._LTC_SPOT_ROW)]
+        hits = KrakenSpotClient._exact_ltc_spot_hits(catalog)
+        if len(hits) != 1:
+            raise PairUnbound(
+                f"LTC/USD spot lookup hit {len(hits)} rows; paper worker cros-ltcusd-955960103 stays paused"
+            )
+        key = str(hits[0].get("key", ""))
+        if key != "XLTCZUSD":
+            raise PairUnbound(
+                "LTC/USD spot row was not XLTCZUSD; paper worker cros-ltcusd-955960103 stays paused"
+            )
+        return key
 
     @staticmethod
     def pair_to_native(symbol: str) -> str:
-        """'BTC/USD' -> 'XBTUSD', 'ETH/EUR' -> 'ETHZEUR'.
+        """'BTC/USD' -> 'XBTUSD', 'ETH/EUR' -> 'ETHZEUR', 'LTC/USD' -> 'XLTCZUSD'.
 
         Simplified pair names accepted by the v0 public/private REST API.
         (WebSocket v2 wants the canonical 'BTC/USD' form instead.)
+
+        LTC/USD is bound only when the confirmed AssetPairs lookup is unique
+        and exact. That row's key is XLTCZUSD. XLTUSD is rejected.
         """
-        base, _, quote = symbol.partition("/")
-        b = KrakenSpotClient._BASE.get(base.upper(), base.upper())
-        q = KrakenSpotClient._QUOTE.get(quote.upper(), quote.upper())
-        return b + q
+        token = (symbol or "").strip().upper()
+        base, _, quote = (symbol or "").partition("/")
+        base_u = base.strip().upper()
+        quote_u = quote.strip().upper()
+        if base_u in {"LTC", "XLT"} or token in {"LTC/USD", "LTCUSD", "XLTCZUSD", "XLTUSD", "XLT/USD"}:
+            return KrakenSpotClient._bind_ltc_spot(symbol)
+        b = KrakenSpotClient._BASE.get(base_u, base_u)
+        q = KrakenSpotClient._QUOTE.get(quote_u, quote_u)
+        native = b + q
+        if native.upper() == "XLTUSD":
+            raise PairUnbound(
+                "rejected XLTUSD; paper worker cros-ltcusd-955960103 stays paused"
+            )
+        return native
 
     _NATIVE_QUOTES = {"USD": "USD", "ZEUR": "EUR", "ZGBP": "GBP", "ZJPY": "JPY"}
     _NATIVE_TO_USER = {
-        "XBT": "BTC", "XXBT": "BTC", "XDG": "DOGE", "XLT": "LTC",
+        "XBT": "BTC", "XXBT": "BTC", "XDG": "DOGE",
         "XETH": "ETH", "XXRP": "XRP", "XLTC": "LTC", "XXLM": "XLM",
         "ZUSD": "USD", "ZEUR": "EUR", "ZGBP": "GBP", "ZJPY": "JPY",
     }
