@@ -1,8 +1,9 @@
 # Trace cros-ltcusd-955960103 (paper CROSS_BOOK): pair_to_native binds LTC/USD
-# only to the one AssetPairs row Peter confirmed (key XLTCZUSD, altname LTCUSD,
-# wsname LTC/USD, base XLTC, quote ZUSD, status online). XLTUSD is rejected.
-# Zero or multiple exact hits leave the pair unbound so that worker stays paused.
-# This file does not place orders and does not init or reset paper state.
+# only from the live GET https://api.kraken.com/0/public/AssetPairs?pair=LTCUSD
+# when no catalog is injected. The only accepted row is key XLTCZUSD, altname
+# LTCUSD, wsname LTC/USD, base XLTC, quote ZUSD, status online. XLTUSD is
+# rejected. Zero or multiple exact hits raise PairUnbound so that worker stays
+# paused. This file does not place orders and does not init or reset paper state.
 """
 Real Kraken Spot REST client (public + private).
 
@@ -271,7 +272,7 @@ class KrakenSpotClient:
     _BASE = {"BTC": "XBT", "DOGE": "XDG", "XETH": "ETH"}
     _QUOTE = {"USD": "USD", "EUR": "ZEUR", "GBP": "ZGBP", "JPY": "ZJPY"}
 
-    # One row from GET /0/public/AssetPairs?pair=LTCUSD. No other spot pair is recorded.
+    # Acceptance rule for the live AssetPairs row. Not a stand-in catalog.
     _LTC_SPOT_ROW = {
         "key": "XLTCZUSD",
         "altname": "LTCUSD",
@@ -282,10 +283,66 @@ class KrakenSpotClient:
     }
     _LTC_SPOT_FIELDS = ("key", "altname", "wsname", "base", "quote", "status")
     _REJECTED_SPOT_KEYS = frozenset({"XLTUSD"})
+    _LTC_SPOT_ASSET_PAIRS_URL = "https://api.kraken.com/0/public/AssetPairs"
+    _LTC_SPOT_ASSET_PAIRS_PARAMS = {"pair": "LTCUSD"}
+
+    @staticmethod
+    def _get_public_json(url: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Public GET only. No API key and no order endpoint."""
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                resp = client.get(url, params=params or None)
+        except httpx.HTTPError as exc:
+            raise PairUnbound(
+                "LTC/USD live spot lookup failed; paper worker cros-ltcusd-955960103 stays paused"
+            ) from exc
+        try:
+            payload = resp.json()
+        except Exception as exc:
+            raise PairUnbound(
+                "LTC/USD live spot lookup was not JSON; paper worker cros-ltcusd-955960103 stays paused"
+            ) from exc
+        if resp.status_code != 200 or not isinstance(payload, dict):
+            raise PairUnbound(
+                "LTC/USD live spot lookup was not one exact row; paper worker cros-ltcusd-955960103 stays paused"
+            )
+        return payload
+
+    @staticmethod
+    def _rows_from_asset_pairs(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Keep only the confirmed AssetPairs fields from result[key]."""
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            return []
+        rows: List[Dict[str, Any]] = []
+        for key, info in result.items():
+            if not isinstance(key, str) or not isinstance(info, dict):
+                continue
+            row: Dict[str, Any] = {"key": key}
+            for field in KrakenSpotClient._LTC_SPOT_FIELDS:
+                if field == "key":
+                    continue
+                value = info.get(field, "")
+                row[field] = value if isinstance(value, str) else ""
+            rows.append(row)
+        return rows
+
+    @staticmethod
+    def _fetch_ltc_spot_rows() -> List[Dict[str, Any]]:
+        payload = KrakenSpotClient._get_public_json(
+            KrakenSpotClient._LTC_SPOT_ASSET_PAIRS_URL,
+            dict(KrakenSpotClient._LTC_SPOT_ASSET_PAIRS_PARAMS),
+        )
+        errors = payload.get("error") or []
+        if errors:
+            raise PairUnbound(
+                "LTC/USD live spot lookup returned an error; paper worker cros-ltcusd-955960103 stays paused"
+            )
+        return KrakenSpotClient._rows_from_asset_pairs(payload)
 
     @staticmethod
     def _exact_ltc_spot_hits(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Rows that equal the single confirmed LTC/USD AssetPairs row."""
+        """Rows that equal the confirmed LTC/USD AssetPairs identity."""
         confirmed = KrakenSpotClient._LTC_SPOT_ROW
         hits: List[Dict[str, Any]] = []
         for row in rows:
@@ -299,26 +356,30 @@ class KrakenSpotClient:
         return hits
 
     @staticmethod
-    def _bind_ltc_spot(symbol: str, rows: Optional[List[Dict[str, Any]]] = None) -> str:
-        """Return XLTCZUSD only when exactly one confirmed row matches.
+    def _ltc_usd_spot_request(symbol: str) -> bool:
+        token = (symbol or "").strip().upper()
+        base, _, quote = (symbol or "").partition("/")
+        return token in {"LTC/USD", "LTCUSD", "XLTCZUSD"} or (
+            base.strip().upper() == "LTC" and quote.strip().upper() == "USD"
+        )
 
-        Any other count leaves cros-ltcusd-955960103 unbound. XLTUSD is never returned.
+    @staticmethod
+    def _bind_ltc_spot(symbol: str, rows: List[Dict[str, Any]]) -> str:
+        """Return XLTCZUSD only when exactly one confirmed row is in rows.
+
+        rows is the live book or a test catalog. There is no one-row default.
+        XLTUSD is never returned.
         """
         token = (symbol or "").strip().upper()
         if token in {"XLTUSD", "XLT/USD"}:
             raise PairUnbound(
                 "rejected XLTUSD; paper worker cros-ltcusd-955960103 stays paused"
             )
-        base, _, quote = (symbol or "").partition("/")
-        base_u = base.strip().upper()
-        quote_u = quote.strip().upper()
-        exact_request = token in {"LTC/USD", "LTCUSD", "XLTCZUSD"} or (base_u == "LTC" and quote_u == "USD")
-        if not exact_request:
+        if not KrakenSpotClient._ltc_usd_spot_request(symbol):
             raise PairUnbound(
                 "LTC spot lookup had no exact LTC/USD row; paper worker cros-ltcusd-955960103 stays paused"
             )
-        catalog = rows if rows is not None else [dict(KrakenSpotClient._LTC_SPOT_ROW)]
-        hits = KrakenSpotClient._exact_ltc_spot_hits(catalog)
+        hits = KrakenSpotClient._exact_ltc_spot_hits(rows)
         if len(hits) != 1:
             raise PairUnbound(
                 f"LTC/USD spot lookup hit {len(hits)} rows; paper worker cros-ltcusd-955960103 stays paused"
@@ -331,21 +392,32 @@ class KrakenSpotClient:
         return key
 
     @staticmethod
-    def pair_to_native(symbol: str) -> str:
-        """'BTC/USD' -> 'XBTUSD', 'ETH/EUR' -> 'ETHZEUR', 'LTC/USD' -> 'XLTCZUSD'.
+    def pair_to_native(symbol: str, rows: Optional[List[Dict[str, Any]]] = None) -> str:
+        """'BTC/USD' -> 'XBTUSD', 'ETH/EUR' -> 'ETHZEUR'.
 
         Simplified pair names accepted by the v0 public/private REST API.
         (WebSocket v2 wants the canonical 'BTC/USD' form instead.)
 
-        LTC/USD is bound only when the confirmed AssetPairs lookup is unique
-        and exact. That row's key is XLTCZUSD. XLTUSD is rejected.
+        LTC/USD is bound only when the live AssetPairs book (or an injected
+        catalog) has one exact XLTCZUSD row. XLTUSD is rejected. No catalog
+        means GET AssetPairs?pair=LTCUSD. Zero or multiple exact hits raise
+        PairUnbound.
         """
         token = (symbol or "").strip().upper()
         base, _, quote = (symbol or "").partition("/")
         base_u = base.strip().upper()
         quote_u = quote.strip().upper()
-        if base_u in {"LTC", "XLT"} or token in {"LTC/USD", "LTCUSD", "XLTCZUSD", "XLTUSD", "XLT/USD"}:
-            return KrakenSpotClient._bind_ltc_spot(symbol)
+        if base_u == "XLT" or token in {"XLTUSD", "XLT/USD"}:
+            raise PairUnbound(
+                "rejected XLTUSD; paper worker cros-ltcusd-955960103 stays paused"
+            )
+        if base_u == "LTC" or token in {"LTC/USD", "LTCUSD", "XLTCZUSD"}:
+            if not KrakenSpotClient._ltc_usd_spot_request(symbol):
+                raise PairUnbound(
+                    "LTC spot lookup had no exact LTC/USD row; paper worker cros-ltcusd-955960103 stays paused"
+                )
+            catalog = rows if rows is not None else KrakenSpotClient._fetch_ltc_spot_rows()
+            return KrakenSpotClient._bind_ltc_spot(symbol, catalog)
         b = KrakenSpotClient._BASE.get(base_u, base_u)
         q = KrakenSpotClient._QUOTE.get(quote_u, quote_u)
         native = b + q

@@ -1,7 +1,8 @@
 # Trace cros-ltcusd-955960103 (paper CROSS_BOOK): these tests check that
-# LTC/USD binds only to XLTCZUSD and PF_LTCUSD when the lookup is one exact
-# hit. XLTUSD, PF_XLTUSD, and PI_LTCUSD are not selected. Zero or multiple
-# hits stay unbound. Tests do not place orders or init or reset paper state.
+# pair_to_native and symbol_to_contract bind LTC/USD only from an injected
+# catalog or from the live public books. Zero hits and more than one exact
+# hit raise PairUnbound without a live network. XLTUSD, PF_XLTUSD, and
+# PI_LTCUSD are not selected. Tests do not place orders or init or reset paper state.
 """
 Conformance tests for the Kraken API signing schemes.
 
@@ -65,8 +66,9 @@ def test_spot_pair_mapping():
     assert KrakenSpotClient.pair_to_native("DOGE/USD") == "XDGUSD"
     assert "LTC" not in KrakenSpotClient._BASE
     assert "XLT" not in KrakenSpotClient._BASE.values()
-    # Round-trips
-    for symbol in ("BTC/USD", "ETH/USD", "ETH/EUR", "XRP/USD", "SOL/USD", "BTC/EUR", "LTC/USD"):
+    # Round-trips. LTC/USD is covered with an injected catalog so this test
+    # does not call the live AssetPairs book.
+    for symbol in ("BTC/USD", "ETH/USD", "ETH/EUR", "XRP/USD", "SOL/USD", "BTC/EUR"):
         assert KrakenSpotClient.native_to_pair(KrakenSpotClient.pair_to_native(symbol)) == symbol
 
 
@@ -74,15 +76,31 @@ def _confirmed_ltc_spot_row():
     return dict(KrakenSpotClient._LTC_SPOT_ROW)
 
 
+def _expect_unbound(fn):
+    try:
+        fn()
+    except PairUnbound:
+        return
+    raise AssertionError("expected PairUnbound")
+
+
 def test_ltc_usd_spot_binds_only_exact_xltczusd():
-    # The confirmed AssetPairs row is the only default hit.
-    assert KrakenSpotClient.pair_to_native("LTC/USD") == "XLTCZUSD"
-    assert KrakenSpotClient.pair_to_native("LTCUSD") == "XLTCZUSD"
-    assert KrakenSpotClient.pair_to_native("XLTCZUSD") == "XLTCZUSD"
-    assert KrakenSpotClient.pair_to_native("LTC/USD") != "XLTUSD"
     row = _confirmed_ltc_spot_row()
-    # A rejected XLTUSD key next to the one exact row is not a second hit.
-    assert KrakenSpotClient._bind_ltc_spot("LTC/USD", rows=[row, {"key": "XLTUSD"}]) == "XLTCZUSD"
+    original = KrakenSpotClient._fetch_ltc_spot_rows
+
+    def _no_live_fetch():
+        raise AssertionError("pair_to_native fetched the live book while a catalog was injected")
+
+    KrakenSpotClient._fetch_ltc_spot_rows = staticmethod(_no_live_fetch)
+    try:
+        assert KrakenSpotClient.pair_to_native("LTC/USD", rows=[row]) == "XLTCZUSD"
+        assert KrakenSpotClient.pair_to_native("LTCUSD", rows=[row]) == "XLTCZUSD"
+        assert KrakenSpotClient.pair_to_native("XLTCZUSD", rows=[row]) == "XLTCZUSD"
+        assert KrakenSpotClient.native_to_pair(KrakenSpotClient.pair_to_native("LTC/USD", rows=[row])) == "LTC/USD"
+        # A rejected XLTUSD key next to the one exact row is not a second hit.
+        assert KrakenSpotClient.pair_to_native("LTC/USD", rows=[row, {"key": "XLTUSD"}]) == "XLTCZUSD"
+    finally:
+        KrakenSpotClient._fetch_ltc_spot_rows = original
 
 
 def test_ltc_usd_spot_unbound_when_not_unique():
@@ -93,18 +111,51 @@ def test_ltc_usd_spot_unbound_when_not_unique():
         [{"key": "XLTUSD"}],
         [dict(row, status="")],
     )
-    for rows in cases:
-        try:
-            KrakenSpotClient._bind_ltc_spot("LTC/USD", rows=rows)
-            raise AssertionError(rows)
-        except PairUnbound:
-            pass
-    for symbol in ("XLTUSD", "XLT/USD", "LTC/EUR"):
-        try:
-            KrakenSpotClient.pair_to_native(symbol)
-            raise AssertionError(symbol)
-        except PairUnbound:
-            pass
+    original = KrakenSpotClient._fetch_ltc_spot_rows
+
+    def _no_live_fetch():
+        raise AssertionError("pair_to_native fetched the live book while a catalog was injected")
+
+    KrakenSpotClient._fetch_ltc_spot_rows = staticmethod(_no_live_fetch)
+    try:
+        for rows in cases:
+            _expect_unbound(lambda rows=rows: KrakenSpotClient.pair_to_native("LTC/USD", rows=rows))
+        for symbol in ("XLTUSD", "XLT/USD", "LTC/EUR"):
+            _expect_unbound(lambda symbol=symbol: KrakenSpotClient.pair_to_native(symbol))
+    finally:
+        KrakenSpotClient._fetch_ltc_spot_rows = original
+
+
+def test_pair_to_native_reads_live_asset_pairs_when_no_catalog():
+    seen = {}
+    original = KrakenSpotClient._get_public_json
+
+    def fake(url, params=None):
+        seen["url"] = url
+        seen["params"] = params
+        return {"error": [], "result": {}}
+
+    KrakenSpotClient._get_public_json = staticmethod(fake)
+    try:
+        _expect_unbound(lambda: KrakenSpotClient.pair_to_native("LTC/USD"))
+    finally:
+        KrakenSpotClient._get_public_json = original
+    assert seen["url"] == "https://api.kraken.com/0/public/AssetPairs"
+    assert seen["params"] == {"pair": "LTCUSD"}
+
+
+def test_pair_to_native_live_payload_zero_and_many_hits_do_not_bind():
+    row = _confirmed_ltc_spot_row()
+    original = KrakenSpotClient._fetch_ltc_spot_rows
+    try:
+        KrakenSpotClient._fetch_ltc_spot_rows = staticmethod(lambda: [])
+        _expect_unbound(lambda: KrakenSpotClient.pair_to_native("LTC/USD"))
+        KrakenSpotClient._fetch_ltc_spot_rows = staticmethod(lambda: [row, dict(row)])
+        _expect_unbound(lambda: KrakenSpotClient.pair_to_native("LTC/USD"))
+        KrakenSpotClient._fetch_ltc_spot_rows = staticmethod(lambda: [row])
+        assert KrakenSpotClient.pair_to_native("LTC/USD") == "XLTCZUSD"
+    finally:
+        KrakenSpotClient._fetch_ltc_spot_rows = original
 
 
 # ---------------------------------------------------------------- Futures
@@ -142,20 +193,33 @@ def test_futures_symbol_mapping():
     assert KrakenFuturesClient.symbol_to_contract("BTC/USD") == "PF_XBTUSD"
     assert KrakenFuturesClient.symbol_to_contract("ETH/USD") == "PF_ETHUSD"
     assert KrakenFuturesClient.symbol_to_contract("DOGE/USD") == "PF_XDGUSD"
-    assert KrakenFuturesClient.symbol_to_contract("LTC/USD") == "PF_LTCUSD"
-    # round-trips
-    for symbol in ("BTC/USD", "ETH/USD", "DOGE/USD", "SOL/USD", "LTC/USD"):
+    # round-trips. LTC/USD uses an injected catalog so this test does not
+    # call the live instruments book.
+    for symbol in ("BTC/USD", "ETH/USD", "DOGE/USD", "SOL/USD"):
         assert KrakenFuturesClient.contract_to_symbol(
             KrakenFuturesClient.symbol_to_contract(symbol)) == symbol
+    assert KrakenFuturesClient.contract_to_symbol(
+        KrakenFuturesClient.symbol_to_contract("LTC/USD", instruments=["PF_LTCUSD"])
+    ) == "LTC/USD"
 
 
 def test_ltc_usd_futures_binds_only_exact_pf_ltcusd():
-    assert KrakenFuturesClient.symbol_to_contract("LTC/USD") == "PF_LTCUSD"
-    assert KrakenFuturesClient.symbol_to_contract("LTCUSD") == "PF_LTCUSD"
-    assert KrakenFuturesClient.symbol_to_contract("PF_LTCUSD") == "PF_LTCUSD"
-    # Fuzzy LTC results include PI_LTCUSD. Only the exact PF_ symbol counts.
+    one = ["PF_LTCUSD"]
     fuzzy = ["PI_LTCUSD", "PF_XLTUSD", "PF_LTCUSD"]
-    assert KrakenFuturesClient._bind_ltc_contract("LTC/USD", instruments=fuzzy) == "PF_LTCUSD"
+    original = KrakenFuturesClient._fetch_ltc_futures_symbols
+
+    def _no_live_fetch():
+        raise AssertionError("symbol_to_contract fetched the live book while a catalog was injected")
+
+    KrakenFuturesClient._fetch_ltc_futures_symbols = staticmethod(_no_live_fetch)
+    try:
+        assert KrakenFuturesClient.symbol_to_contract("LTC/USD", instruments=one) == "PF_LTCUSD"
+        assert KrakenFuturesClient.symbol_to_contract("LTCUSD", instruments=one) == "PF_LTCUSD"
+        assert KrakenFuturesClient.symbol_to_contract("PF_LTCUSD", instruments=one) == "PF_LTCUSD"
+        # Fuzzy LTC results include PI_LTCUSD. Only the exact PF_ symbol counts.
+        assert KrakenFuturesClient.symbol_to_contract("LTC/USD", instruments=fuzzy) == "PF_LTCUSD"
+    finally:
+        KrakenFuturesClient._fetch_ltc_futures_symbols = original
 
 
 def test_ltc_usd_futures_unbound_when_not_unique():
@@ -166,18 +230,64 @@ def test_ltc_usd_futures_unbound_when_not_unique():
         ["PI_LTCUSD", "PF_XLTUSD"],
         ["PF_LTCUSD", "PF_LTCUSD"],
     )
-    for instruments in cases:
-        try:
-            KrakenFuturesClient._bind_ltc_contract("LTC/USD", instruments=instruments)
-            raise AssertionError(instruments)
-        except PairUnbound:
-            pass
-    for symbol in ("PF_XLTUSD", "PI_LTCUSD", "XLT/USD", "LTC/EUR"):
-        try:
-            KrakenFuturesClient.symbol_to_contract(symbol)
-            raise AssertionError(symbol)
-        except PairUnbound:
-            pass
+    original = KrakenFuturesClient._fetch_ltc_futures_symbols
+
+    def _no_live_fetch():
+        raise AssertionError("symbol_to_contract fetched the live book while a catalog was injected")
+
+    KrakenFuturesClient._fetch_ltc_futures_symbols = staticmethod(_no_live_fetch)
+    try:
+        for instruments in cases:
+            _expect_unbound(
+                lambda instruments=instruments: KrakenFuturesClient.symbol_to_contract(
+                    "LTC/USD", instruments=instruments
+                )
+            )
+        for symbol in ("PF_XLTUSD", "PI_LTCUSD", "XLT/USD", "LTC/EUR"):
+            _expect_unbound(lambda symbol=symbol: KrakenFuturesClient.symbol_to_contract(symbol))
+    finally:
+        KrakenFuturesClient._fetch_ltc_futures_symbols = original
+
+
+def test_symbol_to_contract_reads_live_instruments_when_no_catalog():
+    seen = {}
+    original = KrakenFuturesClient._get_public_json
+
+    def fake(url, params=None):
+        seen["url"] = url
+        seen["params"] = params
+        return {
+            "result": "success",
+            "instruments": [
+                {"symbol": "PI_LTCUSD"},
+                {"symbol": "PF_XLTUSD"},
+                {"symbol": "PF_LTCUSD"},
+                {"symbol": "PF_LTCUSD"},
+            ],
+        }
+
+    KrakenFuturesClient._get_public_json = staticmethod(fake)
+    try:
+        _expect_unbound(lambda: KrakenFuturesClient.symbol_to_contract("LTC/USD"))
+    finally:
+        KrakenFuturesClient._get_public_json = original
+    assert seen["url"] == "https://futures.kraken.com/derivatives/api/v3/instruments"
+    assert seen["params"] is None
+
+
+def test_symbol_to_contract_live_payload_zero_and_one_exact_hit():
+    original = KrakenFuturesClient._fetch_ltc_futures_symbols
+    try:
+        KrakenFuturesClient._fetch_ltc_futures_symbols = staticmethod(lambda: [])
+        _expect_unbound(lambda: KrakenFuturesClient.symbol_to_contract("LTC/USD"))
+        KrakenFuturesClient._fetch_ltc_futures_symbols = staticmethod(lambda: ["PI_LTCUSD", "PF_XLTUSD"])
+        _expect_unbound(lambda: KrakenFuturesClient.symbol_to_contract("LTC/USD"))
+        KrakenFuturesClient._fetch_ltc_futures_symbols = staticmethod(
+            lambda: ["PI_LTCUSD", "PF_XLTUSD", "PF_LTCUSD"]
+        )
+        assert KrakenFuturesClient.symbol_to_contract("LTC/USD") == "PF_LTCUSD"
+    finally:
+        KrakenFuturesClient._fetch_ltc_futures_symbols = original
 
 
 def test_client_requires_credentials_for_private():
