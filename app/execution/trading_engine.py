@@ -34,7 +34,9 @@ from app.execution.TradeChurnGuard import ChurnGuardConfig, TradeChurnGuard
 from app.kraken.spot_client import KrakenError, KrakenSpotClient
 from app.logbus import LogBus
 from app.storage.lake import DataLake
+from app.execution.cross_book_paper import flatten_cross_book, start_cross_book_paper, tick_cross_book
 from app.strategies.base import Strategy
+from app.strategies.cross_book_kraken_spot_pro_paper import STRATEGY_NAME, CrossBookStateError
 from app.strategies.registry import get_strategy
 
 logger = logging.getLogger("app.execution.engine")
@@ -44,6 +46,13 @@ MARKET_TYPES = {"SPOT", "PERP"}
 
 class InstanceRuntime:
     def __init__(self, spec: Dict[str, Any]):
+        # market_type is not its own column. The existing PERP/SPOT flag lives on
+        # the instance spec; params_json is the store the strategy API already writes.
+        if spec.get("market_type") not in MARKET_TYPES:
+            raw_params = spec.get("params") or {}
+            mt = str(raw_params.get("market_type") or raw_params.get("marketType") or "").upper()
+            if mt in MARKET_TYPES:
+                spec["market_type"] = mt
         self.spec = spec  # full instance row from the lake
         self.strategy: Strategy = get_strategy(spec["strategy_type"])
         self.params = self.strategy.clamp_genes(dict(spec.get("params", {})))
@@ -78,6 +87,8 @@ class TradingEngine:
         self.instances: Dict[str, InstanceRuntime] = {}
         self._lock = threading.RLock()
         self._ws_service = None  # injected by the app if available
+        self._futures = None
+        self._cross_book_contract_sizes: Dict[str, Any] = {}
 
     # ------------------------------------------------------------- ws inject
     def set_ws_service(self, service) -> None:
@@ -117,11 +128,48 @@ class TradingEngine:
         genome_source: str = "",
         initial_balance: Optional[float] = None,
     ) -> Dict[str, Any]:
+        strategy = get_strategy(strategy_type)
+        if getattr(strategy, "paper_only", False):
+            if strategy.name != STRATEGY_NAME or not getattr(strategy, "book_worker", False):
+                raise CrossBookStateError("paper-only strategy is not the cross-book paper worker")
+            return start_cross_book_paper(
+                self,
+                name=name,
+                symbol=symbol,
+                interval_min=interval_min,
+                params=params,
+                mode=mode,
+                genome_source=genome_source,
+                initial_balance=initial_balance,
+            )
         mode = mode or self.settings.execution_mode
         if mode not in ("paper", "live"):
             mode = "paper"
         if mode == "live" and not (self.settings.spot.configured or self.settings.futures.configured):
             raise KrakenError("live mode requires Kraken credentials")
+        return self._commit_new_instance(
+            strategy_type=strategy_type,
+            name=name,
+            symbol=symbol,
+            interval_min=interval_min,
+            params=params,
+            mode=mode,
+            genome_source=genome_source,
+            initial_balance=initial_balance,
+        )
+
+    def _commit_new_instance(
+        self,
+        strategy_type: str,
+        name: str,
+        symbol: str,
+        interval_min: int,
+        params: Dict[str, Any],
+        mode: str,
+        genome_source: str = "",
+        initial_balance: Optional[float] = None,
+        description: str = "",
+    ) -> Dict[str, Any]:
         inst_id = f"{strategy_type[:4].upper()}-{symbol.replace('/', '')}-{int(time.time() * 1000) % 10**10}".lower()
         row = {
             "id": inst_id,
@@ -135,10 +183,11 @@ class TradingEngine:
             "created_at": int(time.time() * 1000),
             "initial_balance": initial_balance or self.settings.base_budget_usd,
             "genome_source": genome_source,
+            "description": description,
         }
         self.lake.upsert_instance(row)
         self.lake.upsert_state(inst_id, "ACTIVE", row["initial_balance"], row["initial_balance"], 0, 1.0)
-        rt = self._restore_instance(row)
+        self._restore_instance(row)
         self.bus.emit("info", "TradingEngine", f"instance started: {name} ({strategy_type} on {symbol}, {mode})", inst_id)
         return row
 
@@ -261,6 +310,9 @@ class TradingEngine:
         return None
 
     def _tick(self, rt: InstanceRuntime) -> None:
+        if getattr(rt.strategy, "book_worker", False):
+            tick_cross_book(self, rt)
+            return
         spec = rt.spec
         candles = self._candles(rt)
         if len(candles) < max(60, rt.strategy.min_bars):
@@ -420,6 +472,9 @@ class TradingEngine:
         pos = rt.position
         if not pos:
             return
+        if pos.get("kind") == "cross_book":
+            flatten_cross_book(self, rt, reason)
+            return
         iid = rt.spec["id"]
         exit_mark = mark or rt.last_mark or pos["entry_mark"]
         # finalize MFE/MAE against the exit mark (a tick may have moved price)
@@ -561,6 +616,7 @@ class TradingEngine:
                     "symbol": r.spec["symbol"],
                     "interval_min": r.spec["interval_min"],
                     "mode": r.spec["mode"],
+                    "market_type": r.spec.get("market_type") or "SPOT",
                     "status": r.spec["status"],
                     "params": r.params,
                     "m8_state": r.state.status,
@@ -586,7 +642,9 @@ class TradingEngine:
             realized = sum(float(t.get("net_pnl") or 0.0) for t in trades)
             funding = sum(float(t.get("funding_usd") or 0.0) for t in trades)
             unrealized = 0.0
-            if rt.position and rt.last_mark:
+            if rt.position and rt.position.get("kind") == "cross_book":
+                unrealized = 0.0
+            elif rt.position and rt.last_mark:
                 d = 1 if rt.position["side"] == "long" else -1
                 unrealized = (rt.last_mark - rt.position["entry_price"]) * rt.position["amount"] * d
             investment = float(rt.spec.get("initial_balance") or rt.state.base_budget_usd or 0.0)
@@ -597,6 +655,12 @@ class TradingEngine:
             apr = (roi * (365.0 * 86400.0 / elapsed)) if elapsed > 60 else 0.0
             params = rt.params or {}
             status = "active" if (rt.spec.get("status") == "active" and not rt.waiting) else "paused"
+            if rt.position and rt.position.get("kind") == "cross_book":
+                direction = "CROSS"
+            elif rt.position:
+                direction = rt.position["side"].upper()
+            else:
+                direction = "FLAT"
             out.append({
                 "id": iid,
                 "name": rt.spec["name"],
@@ -604,8 +668,9 @@ class TradingEngine:
                 "pair": rt.spec["symbol"],
                 "exchange": "Kraken (paper)" if rt.spec["mode"] == "paper" else "Kraken (live)",
                 "mode": rt.spec["mode"],
+                "marketType": rt.spec.get("market_type") or "SPOT",
                 "status": status,
-                "direction": (rt.position["side"].upper() if rt.position else "FLAT"),
+                "direction": direction,
                 "leverage": float(params.get("leverage") or 1.0),
                 "unrealizedPnL": {
                     "value": round(unrealized, 2),
