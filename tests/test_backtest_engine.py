@@ -255,3 +255,39 @@ def test_registry_strategies_sane():
         clamped = s.clamp_genes({k: 1e6 for k in s.param_space})
         for k, (lo, hi, _) in s.param_space.items():
             assert lo <= clamped[k] <= hi
+
+
+def test_genetic_population_rows_expose_id_rank_without_oos():
+    """A finished run returns every in-sample genome even when fitness is 0.
+
+    Rows carry a stable id and a rank. A missing out-of-sample summary does
+    not drop the row. Metrics are copied from the backtest summary only.
+    """
+    candles = make_candles(360, seed=19)
+    cfg = BacktestConfig(bar_minutes=15, initial_balance_usd=10000.0)
+    res = GeneticOptimizer(EMA_TREND_RSI(), seed=11).run(
+        candles, cfg, population_size=4, generations=1, survivors=1
+    )
+    assert res["ok"]
+    assert res["population"], "zero-fitness genomes must still be returned"
+    seen = set()
+    for row in res["population"]:
+        assert isinstance(row["id"], str) and row["id"].startswith("g-")
+        assert isinstance(row["rank"], int) and row["rank"] >= 1
+        assert row["id"] not in seen
+        seen.add(row["id"])
+        assert row["outOfSampleSummary"] is None
+        summary = row["inSampleSummary"]
+        assert summary is not None
+        assert row["overallReturn"] == summary["totalReturnPercent"]
+        assert row["sharpeRatio"] == summary["sharpeRatio"]
+        assert row["winRate"] == summary["winRate"]
+        assert "fill" not in row
+    if all(row["fitness"] == 0 for row in res["population"]) and all(
+        isinstance(row.get("rejectionReason"), str) and "TRADE STARVATION" in row["rejectionReason"]
+        for row in res["population"]
+    ):
+        assert res["populationNote"] == (
+            "Every genome scored fitness 0 because each in-sample backtest had fewer than 30 trades."
+        )
+

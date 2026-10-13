@@ -9,6 +9,7 @@ from typing import Any, Dict
 import numpy as np
 
 from app.strategies.base import Strategy, StrategyContextView
+from app.strategies.cross_book_kraken_spot_pro_paper import CROSS_BOOK_KRAKEN_SPOT_PRO_PAPER
 
 
 class EMA_TREND_RSI(Strategy):
@@ -165,6 +166,7 @@ REGISTRY: Dict[str, type] = {
     "EMA_TREND_RSI": EMA_TREND_RSI,
     "MEAN_REVERSION_ZSCORE": MEAN_REVERSION_ZSCORE,
     "DONCHIAN_BREAKOUT": DONCHIAN_BREAKOUT,
+    "CROSS_BOOK_KRAKEN_SPOT_PRO_PAPER": CROSS_BOOK_KRAKEN_SPOT_PRO_PAPER,
 }
 
 
@@ -180,6 +182,9 @@ def describe_strategy_code(kind: str, params: Dict[str, Any]) -> str:
     not an executable JavaScript program.)
     """
     s = get_strategy(kind)
+    listing = getattr(s, "code_listing", None)
+    if callable(listing):
+        return listing(params)
     lines = [
         f"// {s.name} — executed by app/strategies/registry.py (real Python strategy)",
         f"// {s.description}",

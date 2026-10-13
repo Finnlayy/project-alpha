@@ -9,15 +9,81 @@ Real genetic walk-forward optimizer.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import random
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
 from app.backtest.engine import BacktestConfig, run_backtest
 from app.optimizer.fitness import evaluate_fitness, evaluate_cadence
 from app.strategies.base import Strategy
+
+
+
+def _genome_id(genes: Dict[str, Any]) -> str:
+    payload = json.dumps(genes, sort_keys=True, separators=(",", ":"), default=str)
+    return "g-" + hashlib.sha256(payload.encode()).hexdigest()[:12]
+
+
+def _summary_metric(summary: Optional[Dict[str, Any]], key: str):
+    """Return a computed summary number, or None when that field was not computed."""
+    if not isinstance(summary, dict) or key not in summary:
+        return None
+    value = summary[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
+
+
+def _population_row(
+    genes: Dict[str, Any],
+    result: Any,
+    fitness_detail: Optional[Dict[str, Any]],
+    rank: int,
+    best_fitness: float,
+) -> Dict[str, Any]:
+    summary = result.summary if result is not None and getattr(result, "ok", False) else None
+    score = None
+    rejection = None
+    if isinstance(fitness_detail, dict):
+        if "fitnessScore" in fitness_detail:
+            score = fitness_detail.get("fitnessScore")
+            rejection = fitness_detail.get("rejectionReason")
+    robustness = None
+    if isinstance(score, (int, float)) and not isinstance(score, bool) and best_fitness > 0:
+        robustness = round(100.0 * (float(score) / best_fitness), 1)
+    return {
+        "id": _genome_id(genes),
+        "rank": rank,
+        "genes": genes,
+        "fitness": score,
+        "inSampleSummary": summary,
+        "outOfSampleSummary": None,
+        "overallReturn": _summary_metric(summary, "totalReturnPercent"),
+        "overallDrawdown": _summary_metric(summary, "maxDrawdownPercent"),
+        "sharpeRatio": _summary_metric(summary, "sharpeRatio"),
+        "winRate": _summary_metric(summary, "winRate"),
+        "tradesCount": _summary_metric(summary, "totalTrades"),
+        "robustnessIndex": robustness,
+        "rejectionReason": rejection if isinstance(rejection, str) else None,
+    }
+
+
+def _population_note(rows: List[Dict[str, Any]]) -> Optional[str]:
+    if not rows:
+        return None
+    scores = [row.get("fitness") for row in rows]
+    if any(isinstance(score, (int, float)) and not isinstance(score, bool) and score > 0 for score in scores):
+        return None
+    if not scores or not all(score == 0 or score == 0.0 for score in scores):
+        return None
+    reasons = [row.get("rejectionReason") for row in rows]
+    if reasons and all(isinstance(reason, str) and "TRADE STARVATION" in reason for reason in reasons):
+        return "Every genome scored fitness 0 because each in-sample backtest had fewer than 30 trades."
+    return None
 
 
 def _non_dominated(items: List[Tuple[float, float, float]]) -> List[int]:
@@ -183,7 +249,26 @@ class GeneticOptimizer:
                 g, r, f = valid_all[idx]
                 pareto.append({"genes": g, "return": r.summary["totalReturnPercent"], "dd": r.summary["maxDrawdownPercent"], "sharpe": r.summary["sharpeRatio"]})
 
-        best = best_ever if best_ever["fitness"] >= 0 else None
+        best_fitness = float(best_ever["fitness"]) if best_ever["fitness"] > 0 else 0.0
+        population_rows = [
+            _population_row(g, r, f, rank + 1, best_fitness)
+            for rank, (g, r, f) in enumerate(valid_all[:population_size])
+        ]
+        population_note = _population_note(population_rows)
+        best_individual = None
+        if best_ever["fitness"] >= 0 and "result" in best_ever:
+            best_individual = _population_row(
+                best_ever["genes"],
+                best_ever["result"],
+                best_ever.get("fitness_detail"),
+                1,
+                best_fitness,
+            )
+            matched = next((row for row in population_rows if row["id"] == best_individual["id"]), None)
+            if matched is not None:
+                best_individual["rank"] = matched["rank"]
+        elif population_rows:
+            best_individual = dict(population_rows[0])
         return {
             "ok": True,
             "strategy": self.strategy.name,
@@ -193,21 +278,9 @@ class GeneticOptimizer:
             "splitOutOfSample": len(candles) - split,
             "durationMs": int((time.time() - started) * 1000),
             "generationHistory": generation_history,
-            "bestIndividual": None if best is None else {
-                "genes": best["genes"],
-                "fitness": best["fitness"],
-                "inSampleSummary": best["result"].summary,
-            },
-            "population": [
-                {
-                    "genes": g,
-                    "fitness": f["fitnessScore"],
-                    "inSampleSummary": r.summary,
-                    "outOfSampleSummary": None,
-                    "robustnessIndex": round(100.0 * (f["fitnessScore"] / max(best_ever["fitness"], 1e-9)) if best_ever["fitness"] > 0 else 0.0, 1),
-                }
-                for g, r, f in valid_all
-            ][:population_size],
+            "bestIndividual": best_individual,
+            "population": population_rows,
+            "populationNote": population_note,
             "survivors": survivors_list,
             "paretoFront": pareto,
         }
